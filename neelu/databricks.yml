@@ -1,0 +1,37 @@
+# Databricks Asset Bundle for Neelu (TEMPLATE — fill in before deploying).
+#
+# This declares the Neelu App resource so it can be deployed with the Databricks
+# CLI: `databricks bundle deploy -t dev`. The CLI is not installed in this
+# hackathon-prep environment, so this file is provided ready for the next agent.
+#
+# Prerequisites (see HANDOFF.md):
+#   * A workspace tier that supports Databricks Apps + Lakebase.
+#   * A Lakebase Postgres database (project/branch/db) reachable via DATABASE_URL.
+#   * Optional: Vector Search endpoint + index, Model Serving endpoint, MLflow.
+
+bundle:
+  name: neelu
+
+variables:
+  database_url:
+    description: Lakebase (or other) Postgres connection string.
+    default: ""
+  uc_catalog:
+    default: neelu
+  uc_schema:
+    default: silver
+
+targets:
+  dev:
+    mode: development
+    default: true
+    # workspace:
+    #   host: https://<workspace>.cloud.databricks.com
+
+resources:
+  apps:
+    neelu:
+      name: neelu
+      description: "Water evidence ledger — cited, human-approved, auditable cases."
+      source_code_path: ./
+      # The App reads env at runtime; wire secrets/vars in the workspace UI or here.

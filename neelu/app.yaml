@@ -1,0 +1,30 @@
+# Databricks Apps runtime manifest.
+#
+# Neelu is a single Node process: Express serves the built client (dist/client)
+# and the /api routes. The app listens on the port Databricks injects via
+# DATABRICKS_APP_PORT (read in src/server/config.ts).
+#
+# Build (`npm install && npm run build`) must run in your deploy pipeline before
+# this command starts. See docs/databricks_setup.md and HANDOFF.md.
+
+command:
+  - "npm"
+  - "run"
+  - "start"
+
+env:
+  - name: LOCAL_SIM
+    value: "false"
+  # Provide the rest via app secrets / environment in the workspace:
+  # - name: DATABASE_URL            # Lakebase Postgres connection string
+  #   valueFrom: neelu-database-url
+  # - name: UC_CATALOG
+  #   value: "neelu"
+  # - name: UC_SCHEMA
+  #   value: "silver"
+  # - name: AI_SEARCH_INDEX_NAME
+  #   value: "neelu.silver.guidance_search_idx"
+  # - name: MODEL_ENDPOINT_NAME
+  #   value: "<your-serving-endpoint>"
+  # - name: MLFLOW_EXPERIMENT_NAME
+  #   value: "/Users/<you>/neelu"

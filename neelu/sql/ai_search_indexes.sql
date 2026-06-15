@@ -1,0 +1,47 @@
+-- Neelu AI Search / Vector Search index design (DATABRICKS mode).
+--
+-- Databricks Vector Search indexes are provisioned via the Vector Search SDK /
+-- REST API / CLI, not pure SQL DDL. This file documents the intended indexes and
+-- the exact source columns so the next agent can create them once a Vector Search
+-- endpoint and embedding model are available.
+--
+-- In LOCAL_SIM these indexes are replaced by an in-memory keyword search over
+-- seeded guidance snippets (see src/server/databricks/aiSearch.ts), which marks
+-- every retrieval result as `fallback: true`.
+--
+-- ---------------------------------------------------------------------------
+-- Index 1 (required): guidance_search_idx
+--   Source : neelu.silver.guidance_chunks
+--   Primary key : chunk_id
+--   Embedding source column : chunk_text
+--   Columns to sync : chunk_id, doc_id, title, chunk_text, source_name,
+--                     source_uri, applies_to
+--   Purpose : retrieve water-quality guidance for the Analyze flow.
+--
+-- Index 2 (optional): case_history_idx
+--   Source : resolved cases joined with findings (build a gold view first)
+--   Primary key : case_id
+--   Embedding source column : summary
+--   Purpose : surface prior similar cases as additional evidence context.
+-- ---------------------------------------------------------------------------
+--
+-- Reference creation (Databricks Vector Search, Python SDK) -- for documentation:
+--
+--   from databricks.vector_search.client import VectorSearchClient
+--   vsc = VectorSearchClient()
+--   vsc.create_delta_sync_index(
+--       endpoint_name="<your-vector-search-endpoint>",
+--       index_name="neelu.silver.guidance_search_idx",
+--       source_table_name="neelu.silver.guidance_chunks",
+--       primary_key="chunk_id",
+--       pipeline_type="TRIGGERED",
+--       embedding_source_column="chunk_text",
+--       embedding_model_endpoint_name="databricks-bge-large-en",
+--   )
+--
+-- The application reads the index name from the AI_SEARCH_INDEX_NAME env var.
+
+-- (Optional) Enable change data feed on the source table so a delta-sync index
+-- can track updates:
+ALTER TABLE neelu.silver.guidance_chunks
+  SET TBLPROPERTIES (delta.enableChangeDataFeed = true);
