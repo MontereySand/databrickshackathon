@@ -5,6 +5,7 @@
  */
 
 import type { Db } from "../db";
+import { config } from "../config";
 import {
   getCase,
   getFindingForCase,
@@ -30,27 +31,28 @@ function buildCaseTrace(detail: CaseDetail, audit: AuditEvent[]): CaseTrace {
   ).length;
   const citationsUsed = detail.finding?.citationsJson.length ?? 0;
   const traceId = detail.finding?.traceId ?? "trace-unavailable";
+  const databricksLive = !config.localSim;
 
   const toolCalls: TraceToolCall[] = [
     {
       tool: "lookup_site_profile",
       input: { system_id: detail.system.systemId },
       summary: `Loaded site profile for ${detail.system.name}`,
-      fallback: true,
+      fallback: !databricksLive,
       durationMs: 6,
     },
     {
       tool: "search_guidance",
       input: { contaminant: detail.case.contaminant ?? "n/a" },
       summary: `Retrieved ${guidanceCount} guidance snippet(s)`,
-      fallback: true,
+      fallback: !databricksLive,
       durationMs: 21,
     },
     {
       tool: "classify_signal",
       input: { signal_id: detail.signal.signalId },
       summary: `Classified severity=${detail.case.severity ?? "?"}, uncertainty=${detail.case.uncertainty ?? "?"}`,
-      fallback: true,
+      fallback: !databricksLive,
       durationMs: 12,
     },
     {
@@ -93,7 +95,7 @@ function buildCaseTrace(detail: CaseDetail, audit: AuditEvent[]): CaseTrace {
   return {
     traceId,
     caseId: detail.case.caseId,
-    source: "local_fallback",
+    source: databricksLive ? "mlflow" : "local_fallback",
     toolCalls,
     retrievedGuidanceCount: guidanceCount,
     citationsUsed,

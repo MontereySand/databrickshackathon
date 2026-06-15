@@ -16,10 +16,15 @@ export const TABLE_NAMES = [
   "tasks",
   "approvals",
   "audit_events",
+  "water_points",
+  "sync_events",
   "demo_runs",
-] as const;
+] as const
 
 export const SCHEMA_SQL = `
+CREATE SCHEMA IF NOT EXISTS neelu_app;
+SET search_path TO neelu_app;
+
 CREATE TABLE IF NOT EXISTS systems (
   system_id         text PRIMARY KEY,
   name              text NOT NULL,
@@ -126,6 +131,30 @@ CREATE TABLE IF NOT EXISTS audit_events (
   created_at  timestamptz NOT NULL DEFAULT now()
 );
 
+CREATE TABLE IF NOT EXISTS water_points (
+  point_id          text PRIMARY KEY,
+  system_id         text REFERENCES systems(system_id),
+  name              text NOT NULL,
+  latitude          numeric NOT NULL,
+  longitude         numeric NOT NULL,
+  h3_cell           text NOT NULL,
+  quality           text NOT NULL,
+  contaminant       text,
+  population_served integer,
+  created_at        timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS sync_events (
+  sync_id      text PRIMARY KEY,
+  batch_id     text NOT NULL,
+  client_id    text NOT NULL,
+  item_kind    text NOT NULL,
+  entity_id    text,
+  payload_json jsonb,
+  created_at   timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (batch_id, client_id)
+);
+
 CREATE TABLE IF NOT EXISTS demo_runs (
   run_id        text PRIMARY KEY,
   scenario_name text,
@@ -143,4 +172,6 @@ CREATE INDEX IF NOT EXISTS idx_tasks_case      ON tasks(case_id);
 CREATE INDEX IF NOT EXISTS idx_approvals_case  ON approvals(case_id);
 CREATE INDEX IF NOT EXISTS idx_audit_entity    ON audit_events(entity_type, entity_id);
 CREATE INDEX IF NOT EXISTS idx_audit_created   ON audit_events(created_at);
-`;
+CREATE INDEX IF NOT EXISTS idx_water_points_h3 ON water_points(h3_cell);
+CREATE INDEX IF NOT EXISTS idx_sync_events_batch ON sync_events(batch_id);
+`

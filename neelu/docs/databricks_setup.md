@@ -1,12 +1,14 @@
-# Databricks setup (flip to live)
+# Databricks Apps setup (flip to live)
 
-This is the provisioning checklist to move Neelu from `LOCAL_SIM` to `DATABRICKS`. None of this is possible on Free Edition; you need a workspace tier that supports **Lakebase** and **Databricks Apps**. See [HANDOFF.md](../HANDOFF.md) for the code-side extension points.
+Neelu deploys as a **Databricks App** following the DevHub **App with Lakebase** template shape: Databricks Apps hosts the Express/Vite process, Lakebase stores operational state, and Databricks Model Serving / Vector Search provide optional agents. See [HANDOFF.md](../HANDOFF.md) for the code-side extension points.
+
+Local development and CI use spoofed `LOCAL_SIM=true` behavior. Live Databricks resources are required only when deploying or testing the production app surface.
 
 ## 0. Prerequisites
 
-- A Databricks workspace (not Free Edition) with Apps + Lakebase enabled.
+- A Databricks workspace with Apps + Lakebase enabled.
 - The `databricks` CLI installed and authenticated (`databricks auth login` or a profile/token).
-- This repo deployable from the workspace (Asset Bundle or App source path).
+- This repo deployable as a Databricks App through the Asset Bundle in `databricks.yml`.
 
 ## 1. Lakebase (operational Postgres)
 
@@ -40,10 +42,10 @@ This is the provisioning checklist to move Neelu from `LOCAL_SIM` to `DATABRICKS
 1. Set `MLFLOW_EXPERIMENT_NAME`.
 2. Implement `src/server/databricks/mlflow.ts` to create/log a trace and return its id with `source: "mlflow"`.
 
-## 6. Deploy
+## 6. Deploy as a Databricks App
 
-- **App manifest** — `app.yaml` runs `npm run start`. Ensure `npm install && npm run build` runs in your pipeline first.
-- **Asset Bundle** — fill in the workspace host in `databricks.yml`, then `databricks bundle deploy -t dev`.
+- **App manifest** — `app.yaml` runs `npm run start` inside Databricks Apps. Ensure `npm install && npm run build` runs first.
+- **Asset Bundle** — `databricks.yml` declares `resources.apps.neelu`; deploy with `databricks bundle deploy -t dev`.
 - Wire `DATABASE_URL` and the resource env vars via workspace secrets/variables (never commit secrets).
 
 ## 7. Verify

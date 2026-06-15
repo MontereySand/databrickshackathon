@@ -4,8 +4,11 @@
 # and the /api routes. The app listens on the port Databricks injects via
 # DATABRICKS_APP_PORT (read in src/server/config.ts).
 #
-# Build (`npm install && npm run build`) must run in your deploy pipeline before
-# this command starts. See docs/databricks_setup.md and HANDOFF.md.
+# This follows the DevHub "App with Lakebase" shape without re-scaffolding:
+# Databricks Apps hosts the HTTP app, Lakebase stores operational rows, and
+# Unity Catalog / Vector Search / Model Serving are declared through app env.
+# Build (`npm install && npm run build`) must run before this command starts.
+# See docs/databricks_setup.md and HANDOFF.md.
 
 command:
   - "npm"
@@ -15,16 +18,23 @@ command:
 env:
   - name: LOCAL_SIM
     value: "false"
-  # Provide the rest via app secrets / environment in the workspace:
-  # - name: DATABASE_URL            # Lakebase Postgres connection string
-  #   valueFrom: neelu-database-url
-  # - name: UC_CATALOG
-  #   value: "neelu"
-  # - name: UC_SCHEMA
-  #   value: "silver"
-  # - name: AI_SEARCH_INDEX_NAME
-  #   value: "neelu.silver.guidance_search_idx"
-  # - name: MODEL_ENDPOINT_NAME
-  #   value: "<your-serving-endpoint>"
-  # - name: MLFLOW_EXPERIMENT_NAME
-  #   value: "/Users/<you>/neelu"
+  - name: LAKEBASE_ENDPOINT
+    valueFrom: postgres
+  - name: DATABRICKS_WAREHOUSE_ID
+    valueFrom: sql-warehouse
+  - name: UC_CATALOG
+    value: "workspace"
+  - name: UC_SCHEMA
+    value: "hackathon"
+  - name: MODEL_ENDPOINT_NAME
+    valueFrom: serving-endpoint
+  - name: EMBEDDING_ENDPOINT_NAME
+    value: "databricks-gte-large-en"
+  - name: AI_SEARCH_INDEX_NAME
+    value: ""
+  - name: AI_SEARCH_ENDPOINT_NAME
+    value: ""
+  - name: MLFLOW_EXPERIMENT_NAME
+    value: "/Users/yagevlevi@gmail.com/neelu"
+  - name: GOOGLE_MAPS_API_KEY
+    valueFrom: google-maps-api-key

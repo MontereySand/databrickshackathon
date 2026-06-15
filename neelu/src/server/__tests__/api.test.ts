@@ -26,7 +26,7 @@ async function auditActionsFor(entityId: string): Promise<string[]> {
   const db = await getDb()
   const { rows } = await db.query<{ action: string }>(
     "SELECT action FROM audit_events WHERE entity_id = $1",
-    [entityId],
+    [entityId]
   )
   return rows.map((r) => r.action)
 }
@@ -71,7 +71,9 @@ describe("POST /api/signals validation", () => {
 
 describe("POST /api/signals/:id/analyze side effects", () => {
   it("creates a cited case, finding, tasks, notices, and audit events", async () => {
-    const res = await request(app).post(`/api/signals/${NITRATE_SIGNAL}/analyze`)
+    const res = await request(app).post(
+      `/api/signals/${NITRATE_SIGNAL}/analyze`
+    )
     expect(res.status).toBe(201)
     const detail = res.body.data
 
@@ -86,9 +88,9 @@ describe("POST /api/signals/:id/analyze side effects", () => {
 
     // All eval scorers pass on the analyzed case.
     expect(detail.trace).not.toBeNull()
-    expect(detail.trace.evalResults.every((r: { passed: boolean }) => r.passed)).toBe(
-      true,
-    )
+    expect(
+      detail.trace.evalResults.every((r: { passed: boolean }) => r.passed)
+    ).toBe(true)
 
     const caseId = detail.case.caseId
     const audit = await request(app).get(`/api/cases/${caseId}/audit`)
@@ -99,8 +101,12 @@ describe("POST /api/signals/:id/analyze side effects", () => {
   })
 
   it("is idempotent: re-analyzing returns the same case", async () => {
-    const first = await request(app).post(`/api/signals/${NITRATE_SIGNAL}/analyze`)
-    const second = await request(app).post(`/api/signals/${NITRATE_SIGNAL}/analyze`)
+    const first = await request(app).post(
+      `/api/signals/${NITRATE_SIGNAL}/analyze`
+    )
+    const second = await request(app).post(
+      `/api/signals/${NITRATE_SIGNAL}/analyze`
+    )
     expect(second.status).toBeLessThan(500)
     expect(second.body.data.case.caseId).toBe(first.body.data.case.caseId)
   })
@@ -109,13 +115,16 @@ describe("POST /api/signals/:id/analyze side effects", () => {
 describe("approve / override decisions are audited and immutable", () => {
   it("approves a case, writes an approval + audit, and rejects a second decision", async () => {
     const analyzed = await request(app).post(
-      `/api/signals/${NITRATE_SIGNAL}/analyze`,
+      `/api/signals/${NITRATE_SIGNAL}/analyze`
     )
     const caseId = analyzed.body.data.case.caseId
 
     const approve = await request(app)
       .post(`/api/cases/${caseId}/approve`)
-      .send({ approver: "Dr. Rao", rationale: "Confirmed high nitrate; proceed." })
+      .send({
+        approver: "Dr. Rao",
+        rationale: "Confirmed high nitrate; proceed.",
+      })
     expect(approve.status).toBe(200)
     expect(approve.body.data.case.status).toBe("approved")
     expect(approve.body.data.approvals.length).toBeGreaterThan(0)
@@ -131,7 +140,7 @@ describe("approve / override decisions are audited and immutable", () => {
 
   it("override requires a replacement action and creates a follow-up task", async () => {
     const analyzed = await request(app).post(
-      `/api/signals/${COLIFORM_SIGNAL}/analyze`,
+      `/api/signals/${COLIFORM_SIGNAL}/analyze`
     )
     const caseId = analyzed.body.data.case.caseId
 
@@ -155,7 +164,7 @@ describe("approve / override decisions are audited and immutable", () => {
 
   it("request-more-evidence moves the case to needs_more_evidence", async () => {
     const analyzed = await request(app).post(
-      `/api/signals/${NITRATE_SIGNAL}/analyze`,
+      `/api/signals/${NITRATE_SIGNAL}/analyze`
     )
     const caseId = analyzed.body.data.case.caseId
 
@@ -178,5 +187,111 @@ describe("GET /api/health", () => {
     expect(res.status).toBe(200)
     expect(res.body.data.mode).toBe("LOCAL_SIM")
     expect(res.body.data.services.length).toBe(5)
+  })
+})
+
+describe("citizen, UPI, sync, and geospatial APIs", () => {
+  it("accepts a spoofed voice transcript and writes parse + case audit events", async () => {
+    const res = await request(app).post("/api/signals").send({
+      mode: "voice",
+      systemId: "sys-school",
+      actor: "citizen",
+      transcript:
+        "The school tap is cloudy and children have diarrhea. Please review urgently.",
+    })
+    expect(res.status).toBe(201)
+    expect(res.body.data.case.status).toBe("awaiting_approval")
+    expect(res.body.data.signal.signalType).toBe("voice_report")
+
+    const signalId = res.body.data.signal.signalId
+    expect(await auditActionsFor(signalId)).toEqual(
+      expect.arrayContaining(["signal_submitted", "voice_signal_parsed"])
+    )
+  })
+
+  it("validates UPI memos and creates a review case for a valid callback", async () => {
+    const invalid = await request(app)
+      .post("/api/upi/callback")
+      .send({ tn: "bad-memo" })
+    expect(invalid.status).toBe(400)
+
+    const valid = await request(app).post("/api/upi/callback").send({
+      transactionId: "txn-spoof-1",
+      tn: "SYS_sys-village_REPORT_URGENT",
+      actor: "upi-spoof",
+    })
+    expect(valid.status).toBe(201)
+    expect(valid.body.data.caseId).toMatch(/^CASE-/)
+    expect(await auditActionsFor(valid.body.data.signalId)).toContain(
+      "upi_callback_received"
+    )
+  })
+
+  it("returns H3 cells with vulnerability index scores", async () => {
+    const res = await request(app).get("/api/h3-map")
+    expect(res.status).toBe(200)
+    expect(res.body.data.cells.length).toBeGreaterThan(0)
+    const cell = res.body.data.cells[0]
+    expect(cell.h3Cell).toBeTruthy()
+    expect(cell.vulnerabilityIndex).toBeCloseTo(
+      cell.medicalDesertScore * cell.waterContaminationScore,
+      2
+    )
+  })
+
+  it("syncs offline contractor completions and marks the case awaiting approval", async () => {
+    const analyzed = await request(app).post(
+      `/api/signals/${NITRATE_SIGNAL}/analyze`
+    )
+    const taskId = analyzed.body.data.tasks[0].taskId
+
+    const sync = await request(app)
+      .post("/api/sync")
+      .send({
+        batchId: "contractor-batch-1",
+        source: "contractor",
+        items: [
+          {
+            kind: "contractor_task_done",
+            clientId: "offline-task-1",
+            taskId,
+            actor: "contractor",
+            notes: "Installed spoof iron filter.",
+          },
+        ],
+      })
+    expect(sync.status).toBe(201)
+    expect(sync.body.data.accepted).toBe(1)
+
+    const detail = await request(app).get(
+      `/api/cases/${analyzed.body.data.case.caseId}`
+    )
+    expect(detail.body.data.case.status).toBe("awaiting_approval")
+    expect(await caseTimelineActions(analyzed.body.data.case.caseId)).toEqual(
+      expect.arrayContaining(["task_completed"])
+    )
+    expect(await auditActionsFor("contractor-batch-1")).toContain(
+      "sync_batch_processed"
+    )
+  })
+
+  it("logs provider review and task assignment to the audit trail", async () => {
+    const analyzed = await request(app).post(
+      `/api/signals/${COLIFORM_SIGNAL}/analyze`
+    )
+    const caseId = analyzed.body.data.case.caseId
+
+    const review = await request(app).post(`/api/cases/${caseId}/review`).send({
+      actor: "provider",
+      severity: "urgent",
+      rationale: "Spoof review found higher urgency.",
+      recommendation: "Assign confirmatory sampling.",
+      assignTo: "contractor-team-a",
+    })
+    expect(review.status).toBe(200)
+    expect(review.body.data.case.severity).toBe("urgent")
+    expect(await caseTimelineActions(caseId)).toEqual(
+      expect.arrayContaining(["severity_adjusted"])
+    )
   })
 })

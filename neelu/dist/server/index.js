@@ -24,12 +24,16 @@ var config = {
   version: APP_VERSION,
   databaseUrl: process.env.DATABASE_URL,
   pgliteDir: process.env.PGLITE_DATA_DIR ?? "./.data/pglite",
+  googleMapsApiKey: process.env.GOOGLE_MAPS_API_KEY,
   databricks: {
     host: process.env.DATABRICKS_HOST,
     token: process.env.DATABRICKS_TOKEN,
     profile: process.env.DATABRICKS_PROFILE,
+    warehouseId: process.env.DATABRICKS_WAREHOUSE_ID,
     modelEndpoint: process.env.MODEL_ENDPOINT_NAME,
+    embeddingEndpoint: process.env.EMBEDDING_ENDPOINT_NAME ?? "databricks-gte-large-en",
     aiSearchIndex: process.env.AI_SEARCH_INDEX_NAME,
+    aiSearchEndpoint: process.env.AI_SEARCH_ENDPOINT_NAME,
     ucCatalog: process.env.UC_CATALOG,
     ucSchema: process.env.UC_SCHEMA,
     mlflowExperiment: process.env.MLFLOW_EXPERIMENT_NAME
@@ -41,6 +45,7 @@ function hasPostgres() {
 
 // src/server/db/index.ts
 import { PGlite } from "@electric-sql/pglite";
+import { createLakebasePool } from "@databricks/lakebase";
 import pg from "pg";
 
 // src/server/db/schema.ts
@@ -53,9 +58,14 @@ var TABLE_NAMES = [
   "tasks",
   "approvals",
   "audit_events",
+  "water_points",
+  "sync_events",
   "demo_runs"
 ];
 var SCHEMA_SQL = `
+CREATE SCHEMA IF NOT EXISTS neelu_app;
+SET search_path TO neelu_app;
+
 CREATE TABLE IF NOT EXISTS systems (
   system_id         text PRIMARY KEY,
   name              text NOT NULL,
@@ -162,6 +172,30 @@ CREATE TABLE IF NOT EXISTS audit_events (
   created_at  timestamptz NOT NULL DEFAULT now()
 );
 
+CREATE TABLE IF NOT EXISTS water_points (
+  point_id          text PRIMARY KEY,
+  system_id         text REFERENCES systems(system_id),
+  name              text NOT NULL,
+  latitude          numeric NOT NULL,
+  longitude         numeric NOT NULL,
+  h3_cell           text NOT NULL,
+  quality           text NOT NULL,
+  contaminant       text,
+  population_served integer,
+  created_at        timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS sync_events (
+  sync_id      text PRIMARY KEY,
+  batch_id     text NOT NULL,
+  client_id    text NOT NULL,
+  item_kind    text NOT NULL,
+  entity_id    text,
+  payload_json jsonb,
+  created_at   timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (batch_id, client_id)
+);
+
 CREATE TABLE IF NOT EXISTS demo_runs (
   run_id        text PRIMARY KEY,
   scenario_name text,
@@ -179,6 +213,8 @@ CREATE INDEX IF NOT EXISTS idx_tasks_case      ON tasks(case_id);
 CREATE INDEX IF NOT EXISTS idx_approvals_case  ON approvals(case_id);
 CREATE INDEX IF NOT EXISTS idx_audit_entity    ON audit_events(entity_type, entity_id);
 CREATE INDEX IF NOT EXISTS idx_audit_created   ON audit_events(created_at);
+CREATE INDEX IF NOT EXISTS idx_water_points_h3 ON water_points(h3_cell);
+CREATE INDEX IF NOT EXISTS idx_sync_events_batch ON sync_events(batch_id);
 `;
 
 // src/server/db/index.ts
@@ -200,23 +236,49 @@ function createPglite() {
     }
   };
 }
-function createPostgres() {
-  const pool = new pg.Pool({ connectionString: config.databaseUrl });
+function createPoolDb(kind, pool) {
   return {
-    kind: "postgres",
+    kind,
     async query(text, params = []) {
-      const result2 = await pool.query(text, params);
-      return { rows: result2.rows };
+      const client2 = await pool.connect();
+      try {
+        await client2.query("SET search_path TO neelu_app");
+        const result2 = await client2.query(text, params);
+        return { rows: result2.rows };
+      } finally {
+        client2.release();
+      }
     },
     async exec(sql) {
-      await pool.query(sql);
+      const client2 = await pool.connect();
+      try {
+        await client2.query("SET search_path TO neelu_app");
+        await client2.query(sql);
+      } finally {
+        client2.release();
+      }
     },
     async close() {
       await pool.end();
     }
   };
 }
+function createPostgres() {
+  return createPoolDb(
+    "postgres",
+    new pg.Pool({ connectionString: config.databaseUrl })
+  );
+}
+function hasLakebaseResource() {
+  return Boolean(
+    process.env.LAKEBASE_ENDPOINT && process.env.PGHOST && process.env.PGDATABASE
+  );
+}
+function createLakebase() {
+  return createPoolDb("lakebase", createLakebasePool());
+}
 function createDb() {
+  if (hasLakebaseResource()) return createLakebase();
   return hasPostgres() ? createPostgres() : createPglite();
 }
 var dbPromise = null;
@@ -231,6 +293,9 @@ function getDb() {
   }
   return dbPromise;
 }
+
+// src/server/services/demo.ts
+import { latLngToCell } from "h3-js";
 
 // src/server/db/mappers.ts
 function toIso(value) {
@@ -253,12 +318,12 @@ function toDateStr(value) {
 }
 function toNum(value) {
   if (value === null || value === void 0) return null;
-  const num = typeof value === "number" ? value : Number(value);
-  return Number.isFinite(num) ? num : null;
+  const num2 = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(num2) ? num2 : null;
 }
 function toInt(value) {
-  const num = toNum(value);
-  return num === null ? null : Math.trunc(num);
+  const num2 = toNum(value);
+  return num2 === null ? null : Math.trunc(num2);
 }
 function toBool(value) {
   return value === true || value === "t" || value === "true" || value === 1;
@@ -421,6 +486,11 @@ function newId(prefix) {
 // src/server/db/repositories.ts
 function jsonParam(value) {
   return value === null || value === void 0 ? null : JSON.stringify(value);
+}
+function num(value) {
+  if (value === null || value === void 0) return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
 }
 async function listSystems(db) {
   const { rows } = await db.query(
@@ -693,6 +763,122 @@ async function listTasks(db, caseId) {
   );
   return rows.map(mapTask);
 }
+async function updateTask(db, taskId, fields) {
+  const sets = [];
+  const params = [];
+  let i = 1;
+  const push = (col, value) => {
+    sets.push(`${col} = $${i}`);
+    params.push(value);
+    i += 1;
+  };
+  if (fields.owner !== void 0) push("owner", fields.owner);
+  if (fields.status !== void 0) push("status", fields.status);
+  if (fields.description !== void 0) push("description", fields.description);
+  sets.push("updated_at = now()");
+  params.push(taskId);
+  const { rows } = await db.query(
+    `UPDATE tasks SET ${sets.join(", ")} WHERE task_id = $${i} RETURNING *`,
+    params
+  );
+  return mapTask(rows[0]);
+}
+async function getTask(db, taskId) {
+  const { rows } = await db.query(
+    "SELECT * FROM tasks WHERE task_id = $1",
+    [taskId]
+  );
+  return rows[0] ? mapTask(rows[0]) : null;
+}
+async function listContractorQueue(db) {
+  const { rows } = await db.query(
+    `SELECT t.*, c.status AS case_status, c.severity, c.contaminant,
+            sys.name AS system_name, sys.latitude, sys.longitude, wp.h3_cell
+       FROM tasks t
+       JOIN cases c ON c.case_id = t.case_id
+       JOIN systems sys ON sys.system_id = c.system_id
+       LEFT JOIN water_points wp ON wp.system_id = sys.system_id
+      WHERE t.status <> 'done'
+      ORDER BY
+        CASE c.severity
+          WHEN 'urgent' THEN 0
+          WHEN 'high' THEN 1
+          WHEN 'moderate' THEN 2
+          ELSE 3
+        END,
+        t.created_at ASC`
+  );
+  return rows.map((row) => ({
+    ...mapTask(row),
+    caseStatus: String(row.case_status),
+    severity: row.severity ? String(row.severity) : null,
+    contaminant: row.contaminant ? String(row.contaminant) : null,
+    systemName: String(row.system_name),
+    latitude: num(row.latitude),
+    longitude: num(row.longitude),
+    h3Cell: row.h3_cell ? String(row.h3_cell) : null,
+    distanceKm: null
+  }));
+}
+async function insertWaterPoint(db, input) {
+  const pointId = input.pointId ?? newId("WPT");
+  const { rows } = await db.query(
+    `INSERT INTO water_points
+      (point_id, system_id, name, latitude, longitude, h3_cell, quality, contaminant, population_served)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+     ON CONFLICT (point_id) DO UPDATE SET
+       system_id = EXCLUDED.system_id,
+       name = EXCLUDED.name,
+       latitude = EXCLUDED.latitude,
+       longitude = EXCLUDED.longitude,
+       h3_cell = EXCLUDED.h3_cell,
+       quality = EXCLUDED.quality,
+       contaminant = EXCLUDED.contaminant,
+       population_served = EXCLUDED.population_served
+     RETURNING *`,
+    [
+      pointId,
+      input.systemId ?? null,
+      input.name,
+      input.latitude,
+      input.longitude,
+      input.h3Cell,
+      input.quality,
+      input.contaminant ?? null,
+      input.populationServed ?? null
+    ]
+  );
+  const row = rows[0];
+  return {
+    pointId: String(row.point_id),
+    systemId: row.system_id ? String(row.system_id) : null,
+    name: String(row.name),
+    latitude: Number(row.latitude),
+    longitude: Number(row.longitude),
+    h3Cell: String(row.h3_cell),
+    quality: String(row.quality),
+    contaminant: row.contaminant ? String(row.contaminant) : null,
+    populationServed: num(row.population_served),
+    createdAt: String(row.created_at)
+  };
+}
+async function listWaterPoints(db) {
+  const { rows } = await db.query(
+    "SELECT * FROM water_points ORDER BY created_at ASC"
+  );
+  return rows.map((row) => ({
+    pointId: String(row.point_id),
+    systemId: row.system_id ? String(row.system_id) : null,
+    name: String(row.name),
+    latitude: Number(row.latitude),
+    longitude: Number(row.longitude),
+    h3Cell: String(row.h3_cell),
+    quality: String(row.quality),
+    contaminant: row.contaminant ? String(row.contaminant) : null,
+    populationServed: num(row.population_served),
+    createdAt: String(row.created_at)
+  }));
+}
 async function insertApproval(db, input) {
   const approvalId = input.approvalId ?? newId("APR");
   const { rows } = await db.query(
@@ -700,13 +886,7 @@ async function insertApproval(db, input) {
       (approval_id, case_id, approver, decision, rationale)
      VALUES ($1,$2,$3,$4,$5)
      RETURNING *`,
-    [
-      approvalId,
-      input.caseId,
-      input.approver,
-      input.decision,
-      input.rationale
-    ]
+    [approvalId, input.caseId, input.approver, input.decision, input.rationale]
   );
   return mapApproval(rows[0]);
 }
@@ -744,10 +924,19 @@ async function listCaseAudit(db, caseId) {
     const { rows: rows2 } = await db.query(sql, [caseId]);
     for (const row of rows2) ids.add(String(row[key]));
   };
-  await collect("SELECT evidence_id FROM evidence_items WHERE case_id = $1", "evidence_id");
-  await collect("SELECT finding_id FROM agent_findings WHERE case_id = $1", "finding_id");
+  await collect(
+    "SELECT evidence_id FROM evidence_items WHERE case_id = $1",
+    "evidence_id"
+  );
+  await collect(
+    "SELECT finding_id FROM agent_findings WHERE case_id = $1",
+    "finding_id"
+  );
   await collect("SELECT task_id FROM tasks WHERE case_id = $1", "task_id");
-  await collect("SELECT approval_id FROM approvals WHERE case_id = $1", "approval_id");
+  await collect(
+    "SELECT approval_id FROM approvals WHERE case_id = $1",
+    "approval_id"
+  );
   const idList = [...ids];
   const placeholders = idList.map((_, idx) => `$${idx + 1}`).join(", ");
   const { rows } = await db.query(
@@ -757,6 +946,29 @@ async function listCaseAudit(db, caseId) {
     idList
   );
   return rows.map(mapAudit);
+}
+async function findSyncEvent(db, batchId, clientId) {
+  const { rows } = await db.query(
+    "SELECT entity_id FROM sync_events WHERE batch_id = $1 AND client_id = $2",
+    [batchId, clientId]
+  );
+  return rows[0] ? { entityId: rows[0].entity_id ? String(rows[0].entity_id) : null } : null;
+}
+async function insertSyncEvent(db, input) {
+  await db.query(
+    `INSERT INTO sync_events
+      (sync_id, batch_id, client_id, item_kind, entity_id, payload_json)
+     VALUES ($1,$2,$3,$4,$5,$6::jsonb)
+     ON CONFLICT (batch_id, client_id) DO NOTHING`,
+    [
+      newId("SYN"),
+      input.batchId,
+      input.clientId,
+      input.itemKind,
+      input.entityId ?? null,
+      jsonParam(input.payloadJson ?? null)
+    ]
+  );
 }
 async function insertDemoRun(db, scenarioName, seed) {
   const runId = newId("RUN");
@@ -780,6 +992,8 @@ async function deleteAllData(db) {
     "evidence_items",
     "cases",
     "signals",
+    "sync_events",
+    "water_points",
     "demo_runs",
     "systems"
   ];
@@ -790,12 +1004,14 @@ async function deleteAllData(db) {
 }
 
 // src/shared/constants.ts
+var SEVERITIES = ["low", "moderate", "high", "urgent"];
 var SEVERITY_LABELS = {
   low: "Low",
   moderate: "Moderate",
   high: "High",
   urgent: "Needs urgent review"
 };
+var UNCERTAINTY_LEVELS = ["low", "medium", "high"];
 var EVAL_SCORERS = [
   "has_citations",
   "requires_human_approval",
@@ -1005,6 +1221,18 @@ async function seedDemo(db, options = {}) {
       latitude: system.latitude,
       longitude: system.longitude
     });
+    const quality = system.systemId === "sys-school" ? "contaminated" : system.systemId === "sys-clinic" ? "caution" : "clean";
+    await insertWaterPoint(db, {
+      pointId: `WPT-${system.systemId.toUpperCase()}`,
+      systemId: system.systemId,
+      name: `${system.name} source`,
+      latitude: system.latitude ?? 0,
+      longitude: system.longitude ?? 0,
+      h3Cell: latLngToCell(system.latitude ?? 0, system.longitude ?? 0, 8),
+      quality,
+      contaminant: quality === "contaminated" ? "nitrate" : quality === "caution" ? "coliform bacteria" : null,
+      populationServed: system.populationServed
+    });
   }
   for (const scenario of SCENARIOS) {
     const threshold = CONTAMINANT_THRESHOLDS[scenario.testType];
@@ -1040,7 +1268,12 @@ async function seedDemo(db, options = {}) {
     entityId: run.runId,
     actor: "system",
     action: "demo_reset",
-    after: { scenarioName, seed, systems: SYSTEMS.length, signals: SCENARIOS.length }
+    after: {
+      scenarioName,
+      seed,
+      systems: SYSTEMS.length,
+      signals: SCENARIOS.length
+    }
   });
   return {
     systems: SYSTEMS.length,
@@ -1095,6 +1328,12 @@ var ConflictError = class extends AppError {
   constructor(message) {
     super(409, "conflict", message);
     this.name = "ConflictError";
+  }
+};
+var ServiceUnavailableError = class extends AppError {
+  constructor(message, details) {
+    super(503, "service_unavailable", message, details);
+    this.name = "ServiceUnavailableError";
   }
 };
 
@@ -1190,6 +1429,71 @@ var GUIDANCE_DOCS = [
   }
 ];
 
+// src/server/databricks/workspace.ts
+import { WorkspaceClient } from "@databricks/sdk-experimental";
+var client = null;
+function getWorkspaceClient() {
+  if (client) return client;
+  client = new WorkspaceClient({
+    host: config.databricks.host,
+    token: config.databricks.token,
+    profile: config.databricks.profile,
+    warehouseId: config.databricks.warehouseId
+  });
+  return client;
+}
+function missingDatabricksDetail(service, envName) {
+  return `${service} is not connected: ${envName} is required when LOCAL_SIM=false`;
+}
+function assertSucceeded(response) {
+  const state = response.status?.state;
+  if (state === "FAILED" || state === "CANCELED" || state === "CLOSED") {
+    const message = response.status?.error?.message ?? response.status?.error?.error_code ?? `SQL statement ended with state ${state}`;
+    throw new Error(message);
+  }
+}
+async function runSqlRows(statement, options = {}) {
+  const { warehouseId, ucCatalog, ucSchema } = config.databricks;
+  if (!warehouseId) {
+    throw new Error(missingDatabricksDetail("Unity Catalog", "DATABRICKS_WAREHOUSE_ID"));
+  }
+  const response = await getWorkspaceClient().statementExecution.executeStatement({
+    statement,
+    warehouse_id: warehouseId,
+    catalog: ucCatalog,
+    schema: ucSchema,
+    wait_timeout: "30s",
+    on_wait_timeout: "CANCEL",
+    disposition: "INLINE",
+    format: "JSON_ARRAY",
+    row_limit: options.rowLimit,
+    parameters: options.parameters
+  });
+  assertSucceeded(response);
+  const columns = response.manifest?.schema?.columns ?? [];
+  const names = columns.map((column, index) => column.name ?? `_c${index}`);
+  const rows = response.result?.data_array ?? [];
+  return rows.map(
+    (row) => Object.fromEntries(names.map((name, index) => [name, row[index] ?? null]))
+  );
+}
+function tableName(table) {
+  const { ucCatalog, ucSchema } = config.databricks;
+  if (!ucCatalog || !ucSchema) {
+    throw new Error(missingDatabricksDetail("Unity Catalog", "UC_CATALOG and UC_SCHEMA"));
+  }
+  return `\`${ucCatalog}\`.\`${ucSchema}\`.\`${table}\``;
+}
+function numberValue(row, key, fallback = 0) {
+  const value = row[key];
+  if (value === null || value === void 0 || value === "") return fallback;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+function stringValue(row, key, fallback = "") {
+  return row[key] ?? fallback;
+}
+
 // src/server/databricks/aiSearch.ts
 function snippet(text, max = 260) {
   return text.length <= max ? text : `${text.slice(0, max).trimEnd()}\u2026`;
@@ -1222,33 +1526,484 @@ function localSearch(query, testType, limit) {
     score
   }));
 }
+function resultFromVectorRow(row, index) {
+  const [id, title, sourceName, sourceUri, content, score] = row;
+  return {
+    guidanceId: id ?? `vector-${index}`,
+    title: title ?? "Databricks Vector Search result",
+    sourceName: sourceName ?? "Unity Catalog Vector Search",
+    sourceUri: sourceUri ?? "",
+    snippet: snippet(content ?? ""),
+    score: Number(score ?? 0)
+  };
+}
+async function liveSearch(query, options, limit) {
+  const index = config.databricks.aiSearchIndex;
+  if (!index) {
+    throw new ServiceUnavailableError(
+      missingDatabricksDetail("Vector Search", "AI_SEARCH_INDEX_NAME")
+    );
+  }
+  const filters = options.testType === void 0 ? void 0 : JSON.stringify({ applies_to: ["all", options.testType] });
+  const response = await getWorkspaceClient().vectorSearchIndexes.queryIndex({
+    index_name: index,
+    columns: ["id", "title", "source_name", "source_uri", "content"],
+    query_text: query,
+    query_type: "HYBRID",
+    filters_json: filters,
+    num_results: limit
+  });
+  return (response.result?.data_array ?? []).map(resultFromVectorRow);
+}
 async function searchGuidance(query, options = {}) {
   const limit = options.limit ?? 4;
+  if (!config.localSim) {
+    const results2 = await liveSearch(query, options, limit);
+    return { results: results2, fallback: false, source: "ai_search" };
+  }
   const results = localSearch(query, options.testType, limit);
   return { results, fallback: true, source: "local_fallback" };
 }
+async function retrieveRagContext(query, options = {}) {
+  const response = await searchGuidance(query, options);
+  return {
+    query,
+    results: response.results,
+    source: response.source === "ai_search" ? "vector_search" : "local_fallback",
+    fallback: response.fallback
+  };
+}
 function aiSearchCapability() {
   const index = config.databricks.aiSearchIndex;
+  if (config.localSim) {
+    return {
+      service: "ai_search",
+      status: "local_fallback",
+      detail: "LOCAL_SIM=true; local keyword retrieval over seeded guidance corpus"
+    };
+  }
+  if (!index) {
+    return {
+      service: "ai_search",
+      status: "error",
+      detail: missingDatabricksDetail("Vector Search", "AI_SEARCH_INDEX_NAME")
+    };
+  }
   return {
     service: "ai_search",
-    status: "local_fallback",
-    detail: index ? `AI_SEARCH_INDEX_NAME=${index} configured; live adapter not yet implemented, using local keyword retrieval` : "Local keyword retrieval over seeded guidance corpus"
+    status: "connected",
+    detail: `Querying Databricks Vector Search index ${index}`
   };
 }
 
+// src/shared/schemas.ts
+import { z } from "zod";
+var isoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/u, "Expected a YYYY-MM-DD date");
+var dateOrDateTime = z.string().refine((value) => !Number.isNaN(Date.parse(value)), "Expected a valid date");
+var createSignalSchema = z.object({
+  systemId: z.string().min(1, "Select a water system"),
+  signalType: z.string().min(1).max(60).default("field_test"),
+  testType: z.enum(TEST_TYPES),
+  resultValue: z.coerce.number().refine((value) => Number.isFinite(value), "Enter a numeric result"),
+  unit: z.string().min(1, "Unit is required").max(20),
+  kitId: z.string().max(60).optional().nullable(),
+  kitExpiresAt: isoDate.optional().nullable(),
+  locationLabel: z.string().max(200).optional().nullable(),
+  notes: z.string().max(2e3).optional().nullable(),
+  photoRef: z.string().max(300).optional().nullable(),
+  submittedBy: z.string().min(1).max(120).optional()
+});
+var parsedSignalSchema = z.object({
+  systemId: z.string().min(1),
+  testType: z.enum(TEST_TYPES),
+  resultValue: z.coerce.number().finite(),
+  unit: z.string().min(1).max(20),
+  severity: z.enum(SEVERITIES),
+  contaminant: z.string().min(1).max(120),
+  summary: z.string().min(1).max(600),
+  uncertainty: z.enum(UNCERTAINTY_LEVELS),
+  confidence: z.number().min(0).max(1),
+  locationLabel: z.string().max(200).nullable().optional(),
+  symptoms: z.array(z.string().min(1).max(80)).default([]),
+  missingFields: z.array(z.string().min(1).max(80)).default([])
+}).strict();
+var voiceSignalSchema = z.object({
+  mode: z.literal("voice").default("voice"),
+  transcript: z.string().min(3).max(5e3),
+  systemId: z.string().min(1).optional(),
+  actor: z.string().min(1).max(120).default("citizen"),
+  latitude: z.coerce.number().min(-90).max(90).optional(),
+  longitude: z.coerce.number().min(-180).max(180).optional(),
+  h3Cell: z.string().min(1).max(32).optional(),
+  photoRef: z.string().max(300).optional().nullable()
+}).strict();
+var signalIntakeSchema = z.union([
+  createSignalSchema,
+  voiceSignalSchema
+]);
+var upiCallbackSchema = z.object({
+  transactionId: z.string().min(1).max(120).default(() => `upi-${Date.now()}`),
+  memo: z.string().min(1).max(240).optional(),
+  tn: z.string().min(1).max(240).optional(),
+  amount: z.coerce.number().nonnegative().optional(),
+  actor: z.string().min(1).max(120).default("upi-webhook")
+}).strict().refine((value) => Boolean(value.memo ?? value.tn), {
+  message: "memo or tn is required",
+  path: ["memo"]
+});
+var contractorTaskDoneSchema = z.object({
+  kind: z.literal("contractor_task_done"),
+  clientId: z.string().min(1).max(120),
+  taskId: z.string().min(1).max(120),
+  actor: z.string().min(1).max(120).default("contractor"),
+  notes: z.string().max(2e3).optional().nullable(),
+  photoRef: z.string().max(300).optional().nullable(),
+  completedAt: dateOrDateTime.optional()
+}).strict();
+var citizenReportSyncSchema = z.object({
+  kind: z.literal("citizen_report"),
+  clientId: z.string().min(1).max(120),
+  transcript: z.string().min(3).max(5e3),
+  systemId: z.string().min(1).optional(),
+  actor: z.string().min(1).max(120).default("citizen"),
+  latitude: z.coerce.number().min(-90).max(90).optional(),
+  longitude: z.coerce.number().min(-180).max(180).optional(),
+  h3Cell: z.string().min(1).max(32).optional()
+}).strict();
+var syncBatchSchema = z.object({
+  batchId: z.string().min(1).max(120),
+  source: z.enum(["citizen", "contractor"]).default("citizen"),
+  items: z.array(
+    z.discriminatedUnion("kind", [
+      citizenReportSyncSchema,
+      contractorTaskDoneSchema
+    ])
+  ).min(1).max(50)
+}).strict();
+var assignTaskSchema = z.object({
+  owner: z.string().min(1).max(120),
+  actor: z.string().min(1).max(120).default("provider")
+}).strict();
+var completeTaskSchema = z.object({
+  actor: z.string().min(1).max(120).default("contractor"),
+  notes: z.string().max(2e3).optional().nullable(),
+  photoRef: z.string().max(300).optional().nullable()
+}).strict();
+var reviewCaseSchema = z.object({
+  actor: z.string().min(1).max(120).default("provider"),
+  severity: z.enum(SEVERITIES).optional(),
+  recommendation: z.string().max(2e3).optional(),
+  rationale: z.string().min(1).max(2e3),
+  assignTo: z.string().min(1).max(120).optional()
+}).strict();
+var h3MapQuerySchema = z.object({
+  lat: z.coerce.number().min(-90).max(90).optional(),
+  lng: z.coerce.number().min(-180).max(180).optional(),
+  limit: z.coerce.number().int().min(1).max(250).default(80)
+}).strict();
+var analyzeSchema = z.object({
+  actor: z.string().min(1).max(120).optional()
+}).default({});
+var approveSchema = z.object({
+  approver: z.string().min(1, "Approver name is required").max(120),
+  rationale: z.string().min(1, "A rationale is required").max(2e3)
+});
+var overrideSchema = z.object({
+  approver: z.string().min(1, "Approver name is required").max(120),
+  rationale: z.string().min(1, "An override rationale is required").max(2e3),
+  replacementAction: z.string().min(1, "A replacement action is required").max(2e3)
+});
+var requestMoreEvidenceSchema = z.object({
+  approver: z.string().min(1).max(120).optional(),
+  requestedEvidence: z.string().min(1, "Describe the evidence you need").max(2e3),
+  owner: z.string().min(1, "Assign an owner").max(120),
+  dueAt: dateOrDateTime
+});
+var demoResetSchema = z.object({
+  scenario: z.string().min(1).max(120).optional(),
+  seed: z.coerce.number().int().optional(),
+  focusScenario: z.enum(SCENARIO_IDS).optional()
+}).default({});
+
 // src/server/databricks/modelServing.ts
-async function generateFindingWithModel(_request) {
-  return {
-    available: false,
-    reason: config.databricks.modelEndpoint ? "Model endpoint configured but live adapter not yet implemented" : "No model endpoint configured (LOCAL_SIM)"
-  };
+import { z as z2 } from "zod";
+
+// src/agents/safety.ts
+var SAFETY_DISCLAIMER = "Advisory only. Neelu does not certify legal or regulatory compliance and sends no notifications. A human must review and approve any public-health action.";
+var HUMAN_APPROVAL_STATEMENT = "Human approval is required before any action is taken.";
+var FORBIDDEN_COMPLIANCE_PATTERNS = [
+  /certif\w*\s+complian/iu,
+  /compliance\s+certif/iu,
+  /legally\s+complian/iu,
+  /guarantee[sd]?\s+complian/iu,
+  /meets\s+all\s+(regulations|requirements)/iu,
+  /officially\s+(safe|compliant)/iu
+];
+function containsComplianceClaim(text) {
+  return FORBIDDEN_COMPLIANCE_PATTERNS.some((pattern) => pattern.test(text));
+}
+function checkFindingSafety(input) {
+  const violations = [];
+  if (input.citations.length === 0) {
+    violations.push("Finding has no supporting citations.");
+  }
+  if (!input.recommendation.includes(HUMAN_APPROVAL_STATEMENT)) {
+    violations.push("Recommendation does not state human approval is required.");
+  }
+  const combined = `${input.findingText} ${input.recommendation}`;
+  if (containsComplianceClaim(combined)) {
+    violations.push("Finding contains a prohibited compliance certification claim.");
+  }
+  return { ok: violations.length === 0, violations };
+}
+function withApprovalStatement(recommendation) {
+  if (recommendation.includes(HUMAN_APPROVAL_STATEMENT)) return recommendation;
+  const trimmed = recommendation.trim();
+  const sep = trimmed.endsWith(".") ? " " : ". ";
+  return `${trimmed}${sep}${HUMAN_APPROVAL_STATEMENT}`;
+}
+
+// src/agents/prompts.ts
+var SYSTEM_PROMPT = `You are Neelu, a cautious water-quality analysis assistant.
+Rules you must always follow:
+- ${SAFETY_DISCLAIMER}
+- ${HUMAN_APPROVAL_STATEMENT}
+- Every claim must cite one of the provided guidance snippets, or be explicitly marked as unsupported.
+- Always flag uncertainty for field-kit results and recommend confirmatory laboratory sampling.
+- Never state that water is safe/unsafe as a legal determination and never certify compliance.
+Return strict JSON: { "classification": string, "recommendation": string, "severity": "low|moderate|high|urgent", "uncertainty": "low|medium|high", "confidence": number }`;
+
+// src/server/databricks/modelServing.ts
+var modelFindingSchema = z2.object({
+  classification: z2.string().min(1),
+  recommendation: z2.string().min(1),
+  severity: z2.enum(["low", "moderate", "high", "urgent"]),
+  uncertainty: z2.enum(["low", "medium", "high"]),
+  confidence: z2.number().min(0).max(1)
+}).strict();
+var providerInsightSchema = z2.object({
+  headline: z2.string().min(1),
+  summary: z2.string().min(1),
+  recommendedActions: z2.array(z2.string().min(1)).min(2).max(6),
+  watchlistDistricts: z2.array(z2.string().min(1)).min(1).max(8)
+}).strict();
+var KEYWORDS = [
+  { testType: "arsenic", terms: ["arsenic"] },
+  {
+    testType: "total_coliform",
+    terms: ["coliform", "e coli", "e. coli", "diarrhea", "stomach"]
+  },
+  { testType: "nitrate", terms: ["nitrate", "fertilizer", "blue baby"] },
+  { testType: "turbidity", terms: ["turbid", "cloudy", "muddy", "brown"] },
+  { testType: "free_chlorine", terms: ["chlorine", "bleach", "smell"] },
+  { testType: "ph", terms: ["ph", "acidic", "bitter"] }
+];
+function severityFor(testType, transcript) {
+  const urgentWords = [
+    "urgent",
+    "hospital",
+    "vomit",
+    "infant",
+    "children",
+    "skin lesions"
+  ];
+  if (urgentWords.some((term) => transcript.includes(term))) return "urgent";
+  return CONTAMINANT_THRESHOLDS[testType].severityWhenExceeded;
+}
+function pickTestType(transcript) {
+  const normalized = transcript.toLowerCase();
+  return KEYWORDS.find(
+    (entry) => entry.terms.some((term) => normalized.includes(term))
+  )?.testType ?? "total_coliform";
+}
+function symptomsFrom(transcript) {
+  const normalized = transcript.toLowerCase();
+  return [
+    ["diarrhea", "diarrhea"],
+    ["vomit", "vomiting"],
+    ["skin", "skin lesions"],
+    ["fever", "fever"],
+    ["stomach", "stomach pain"]
+  ].filter(([needle]) => normalized.includes(needle)).map(([, symptom]) => symptom);
+}
+function extractJsonObject(text) {
+  const trimmed = text.trim();
+  if (trimmed.startsWith("{") && trimmed.endsWith("}")) return JSON.parse(trimmed);
+  const fenced = trimmed.match(/```(?:json)?\s*(\{[\s\S]*?\})\s*```/u);
+  if (fenced) return JSON.parse(fenced[1]);
+  const first = trimmed.indexOf("{");
+  const last = trimmed.lastIndexOf("}");
+  if (first >= 0 && last > first) return JSON.parse(trimmed.slice(first, last + 1));
+  throw new Error("Model response did not contain a JSON object");
+}
+async function queryChatJson(system, user) {
+  const endpoint = config.databricks.modelEndpoint;
+  if (!endpoint) {
+    throw new ServiceUnavailableError(
+      missingDatabricksDetail("Model Serving", "MODEL_ENDPOINT_NAME")
+    );
+  }
+  const response = await getWorkspaceClient().servingEndpoints.query({
+    name: endpoint,
+    messages: [
+      { role: "system", content: system },
+      { role: "user", content: user }
+    ],
+    temperature: 0,
+    max_tokens: 900
+  });
+  const content = response.choices?.[0]?.message?.content ?? response.choices?.[0]?.text ?? "";
+  return extractJsonObject(content);
+}
+function parseSignalPrompt(request) {
+  return [
+    "Extract a structured water-quality citizen signal from this transcript.",
+    "Return strict JSON only with this shape:",
+    '{"systemId":"string","testType":"nitrate|total_coliform|turbidity|ph|arsenic|free_chlorine","resultValue":number,"unit":"string","severity":"low|moderate|high|urgent","contaminant":"string","summary":"string","uncertainty":"low|medium|high","confidence":number,"locationLabel":string|null,"symptoms":["string"],"missingFields":["string"]}',
+    "If a field is missing, infer conservatively and list it in missingFields.",
+    request.systemId ? `Known systemId: ${request.systemId}` : "Known systemId: unknown",
+    request.contextSnippets?.length ? `RAG context:
+${request.contextSnippets.join("\n---\n")}` : "RAG context: none",
+    `Transcript: ${request.transcript}`
+  ].join("\n");
+}
+async function parseSignalWithModel(request) {
+  const transcript = request.transcript.toLowerCase();
+  const testType = pickTestType(transcript);
+  const threshold = CONTAMINANT_THRESHOLDS[testType];
+  const hasNumber = request.transcript.match(/\b\d+(?:\.\d+)?\b/u);
+  const resultValue = hasNumber ? Number(hasNumber[0]) : threshold.thresholdValue + 1;
+  const parsed = parsedSignalSchema.parse({
+    systemId: request.systemId ?? "sys-village",
+    testType,
+    resultValue,
+    unit: threshold.unit,
+    severity: severityFor(testType, transcript),
+    contaminant: threshold.contaminant,
+    summary: `Citizen voice report suggests ${threshold.contaminant}; provider review required before action.`,
+    uncertainty: request.systemId ? "medium" : "high",
+    confidence: request.systemId ? 0.74 : 0.52,
+    locationLabel: request.systemId ? null : "citizen reported location",
+    symptoms: symptomsFrom(transcript),
+    missingFields: request.systemId ? [] : ["systemId"]
+  });
+  if (config.localSim) {
+    return { available: true, parsed, source: "local_sim" };
+  }
+  try {
+    const modelJson = await queryChatJson(
+      "You are a cautious water-quality intake extraction model. Return JSON only.",
+      parseSignalPrompt(request)
+    );
+    return {
+      available: true,
+      parsed: parsedSignalSchema.parse(modelJson),
+      source: "model_serving"
+    };
+  } catch {
+    return { available: true, parsed, source: "safety_net" };
+  }
+}
+async function generateFindingWithModel(request) {
+  if (config.localSim) {
+    return {
+      available: false,
+      reason: "LOCAL_SIM=true; deterministic classifier is active"
+    };
+  }
+  try {
+    const modelJson = await queryChatJson(
+      SYSTEM_PROMPT,
+      [
+        request.prompt,
+        `Signal summary: ${request.signalSummary}`,
+        "Guidance snippets:",
+        request.guidanceSnippets.map((item, index) => `[${index + 1}] ${item}`).join("\n"),
+        "Return the strict JSON object only."
+      ].filter(Boolean).join("\n\n")
+    );
+    return {
+      available: true,
+      finding: modelFindingSchema.parse(modelJson)
+    };
+  } catch (error) {
+    return {
+      available: false,
+      reason: error instanceof Error ? error.message : "Model Serving did not return a usable finding"
+    };
+  }
+}
+async function generateProviderInsightWithModel(dashboard, cases) {
+  if (config.localSim) {
+    return {
+      headline: "Local simulation insight",
+      summary: "LOCAL_SIM=true; provider insight generation is using the spoofed test path.",
+      recommendedActions: [
+        "Run the app with LOCAL_SIM=false to use Databricks Model Serving.",
+        "Review urgent cases before assigning field follow-up."
+      ],
+      watchlistDistricts: dashboard.priorityGeographies.slice(0, 3).map((item) => item.districtName),
+      modelEndpoint: "local_sim",
+      generatedAt: (/* @__PURE__ */ new Date()).toISOString()
+    };
+  }
+  const endpoint = config.databricks.modelEndpoint;
+  if (!endpoint) {
+    throw new ServiceUnavailableError(
+      missingDatabricksDetail("Model Serving", "MODEL_ENDPOINT_NAME")
+    );
+  }
+  try {
+    const modelJson = await queryChatJson(
+      "You are a cautious provider operations insight agent for Neelu. Return JSON only. Do not make medical diagnoses or compliance determinations.",
+      [
+        "Create concise role-specific insights for a healthcare provider reviewing India water-risk and medical-access data.",
+        'Return strict JSON: {"headline":"string","summary":"string","recommendedActions":["string"],"watchlistDistricts":["string"]}.',
+        "Use only the supplied dashboard/case data. Mention human review where recommendations may affect people.",
+        `Dashboard: ${JSON.stringify(dashboard).slice(0, 12e3)}`,
+        `Open cases: ${JSON.stringify(cases.slice(0, 20)).slice(0, 6e3)}`
+      ].join("\n\n")
+    );
+    const parsed = providerInsightSchema.parse(modelJson);
+    return {
+      ...parsed,
+      modelEndpoint: endpoint,
+      generatedAt: (/* @__PURE__ */ new Date()).toISOString()
+    };
+  } catch (error) {
+    return {
+      headline: "AI insight unavailable",
+      summary: error instanceof Error ? `Databricks Model Serving did not return an insight: ${error.message}` : "Databricks Model Serving did not return an insight.",
+      recommendedActions: [
+        "Use the ranked geographies and open cases while the endpoint is unavailable.",
+        "Retry insight generation after the model endpoint is re-enabled."
+      ],
+      watchlistDistricts: dashboard.priorityGeographies.slice(0, 3).map((item) => item.districtName),
+      modelEndpoint: endpoint,
+      generatedAt: (/* @__PURE__ */ new Date()).toISOString()
+    };
+  }
 }
 function modelCapability() {
   const endpoint = config.databricks.modelEndpoint;
+  if (config.localSim) {
+    return {
+      service: "model_serving",
+      status: "local_fallback",
+      detail: "LOCAL_SIM=true; deterministic rule-based finding is active"
+    };
+  }
+  if (!endpoint) {
+    return {
+      service: "model_serving",
+      status: "error",
+      detail: missingDatabricksDetail("Model Serving", "MODEL_ENDPOINT_NAME")
+    };
+  }
   return {
     service: "model_serving",
-    status: "local_fallback",
-    detail: endpoint ? `MODEL_ENDPOINT_NAME=${endpoint} configured; live adapter not yet implemented, using deterministic finding` : "Deterministic rule-based finding (no model endpoint)"
+    status: "connected",
+    detail: `Querying Databricks Model Serving endpoint ${endpoint}`
   };
 }
 
@@ -1256,38 +2011,434 @@ function modelCapability() {
 function newTraceId() {
   return newId("trace").toLowerCase();
 }
-async function logTrace(_trace) {
-  return { source: "local_fallback" };
+async function getOrCreateExperimentId(name) {
+  const experiments = getWorkspaceClient().experiments;
+  try {
+    const existing = await experiments.getByName({ experiment_name: name });
+    if (existing.experiment?.experiment_id) return existing.experiment.experiment_id;
+  } catch {
+  }
+  const created = await experiments.createExperiment({ name });
+  if (!created.experiment_id) {
+    throw new ServiceUnavailableError(
+      `MLflow experiment ${name} could not be created or resolved`
+    );
+  }
+  return created.experiment_id;
+}
+async function logTrace(trace) {
+  if (config.localSim) return { source: "local_fallback" };
+  const experimentName = config.databricks.mlflowExperiment;
+  if (!experimentName) {
+    throw new ServiceUnavailableError(
+      missingDatabricksDetail("MLflow", "MLFLOW_EXPERIMENT_NAME")
+    );
+  }
+  const experiments = getWorkspaceClient().experiments;
+  const experimentId = await getOrCreateExperimentId(experimentName);
+  const startedAt = new Date(trace.createdAt).getTime();
+  const run = await experiments.createRun({
+    experiment_id: experimentId,
+    run_name: `neelu-${trace.caseId}-${trace.traceId}`,
+    start_time: Number.isFinite(startedAt) ? startedAt : Date.now(),
+    tags: [
+      { key: "neelu.trace_id", value: trace.traceId },
+      { key: "neelu.case_id", value: trace.caseId },
+      { key: "neelu.source", value: "databricks-app" }
+    ]
+  });
+  const runId = run.run?.info?.run_id;
+  if (!runId) throw new ServiceUnavailableError("MLflow did not return a run_id");
+  const timestamp = Date.now();
+  await experiments.logBatch({
+    run_id: runId,
+    params: [
+      { key: "case_id", value: trace.caseId },
+      { key: "trace_id", value: trace.traceId }
+    ],
+    metrics: [
+      {
+        key: "tool_calls",
+        value: trace.toolCalls.length,
+        timestamp,
+        step: 0
+      },
+      {
+        key: "retrieved_guidance_count",
+        value: trace.retrievedGuidanceCount,
+        timestamp,
+        step: 0
+      },
+      {
+        key: "citations_used",
+        value: trace.citationsUsed,
+        timestamp,
+        step: 0
+      },
+      ...trace.evalResults.map((result2, index) => ({
+        key: `eval_${result2.scorer}`,
+        value: result2.passed ? 1 : 0,
+        timestamp,
+        step: index
+      }))
+    ],
+    tags: trace.toolCalls.slice(0, 20).map((toolCall, index) => ({
+      key: `neelu.tool.${index}`,
+      value: `${toolCall.tool}:${toolCall.fallback ? "fallback" : "live"}`
+    }))
+  });
+  await experiments.updateRun({
+    run_id: runId,
+    status: "FINISHED",
+    end_time: Date.now()
+  });
+  return { source: "mlflow" };
 }
 function mlflowCapability() {
   const experiment = config.databricks.mlflowExperiment;
+  if (config.localSim) {
+    return {
+      service: "mlflow",
+      status: "local_fallback",
+      detail: "LOCAL_SIM=true; local in-app trace and eval are active"
+    };
+  }
+  if (!experiment) {
+    return {
+      service: "mlflow",
+      status: "error",
+      detail: missingDatabricksDetail("MLflow", "MLFLOW_EXPERIMENT_NAME")
+    };
+  }
   return {
     service: "mlflow",
-    status: "local_fallback",
-    detail: experiment ? `MLFLOW_EXPERIMENT_NAME=${experiment} configured; live logging not yet implemented, using local trace` : "Local in-app trace + eval (no MLflow experiment)"
+    status: "connected",
+    detail: `Logging traces and eval metrics to MLflow experiment ${experiment}`
   };
 }
 
 // src/server/databricks/unityCatalog.ts
+import { cellToBoundary, latLngToCell as latLngToCell2 } from "h3-js";
+function cleanScore(value) {
+  return Number(Math.min(1, Math.max(0, value)).toFixed(3));
+}
+function qualityFromScore(score) {
+  if (score >= 0.7) return "contaminated";
+  if (score >= 0.35) return "caution";
+  return "clean";
+}
 async function lookupSiteProfile(db, systemId) {
   const system = await getSystem(db, systemId);
   if (!system) return null;
+  if (!config.localSim) {
+    const hasCoords = system.latitude != null && system.longitude != null;
+    const orderBy = hasCoords ? `pow(centroid_latitude - ${system.latitude}, 2)
+             + pow(centroid_longitude - ${system.longitude}, 2) ASC,
+        priority_rank ASC` : "priority_rank ASC";
+    const rows = await runSqlRows(
+      `
+      SELECT
+        state_name,
+        district_name,
+        priority_rank,
+        neelu_priority_score,
+        water_burden_score,
+        medical_desert_score,
+        dominant_quality_parameter,
+        affected_habitation_count,
+        facility_count,
+        hospital_count,
+        priority_reason
+      FROM ${tableName("app_priority_geographies")}
+      WHERE centroid_latitude IS NOT NULL
+        AND centroid_longitude IS NOT NULL
+      ORDER BY ${orderBy}
+      LIMIT 1
+      `,
+      { rowLimit: 1 }
+    );
+    const row = rows[0];
+    if (row) {
+      const district = stringValue(row, "district_name", "Unknown district");
+      const state = stringValue(row, "state_name", "Unknown state");
+      const contaminant = stringValue(
+        row,
+        "dominant_quality_parameter",
+        "water quality issue"
+      );
+      const riskNotes2 = [
+        `${district}, ${state} is ranked #${numberValue(row, "priority_rank")} in the Unity Catalog priority geography table.`,
+        `Priority score ${cleanScore(numberValue(row, "neelu_priority_score"))}; water burden ${cleanScore(numberValue(row, "water_burden_score"))}; medical desert score ${cleanScore(numberValue(row, "medical_desert_score"))}.`,
+        `Dominant parameter: ${contaminant}; affected habitations ${numberValue(row, "affected_habitation_count")}; facilities ${numberValue(row, "facility_count")}; hospitals ${numberValue(row, "hospital_count")}.`,
+        stringValue(row, "priority_reason", "")
+      ].filter(Boolean).join(" ");
+      return { system, riskNotes: riskNotes2, source: "unity_catalog" };
+    }
+  }
   const seed = SYSTEMS.find((entry) => entry.systemId === systemId);
   const riskNotes = seed?.riskNotes ?? "No additional risk profile on file for this system.";
   return { system, riskNotes, source: "local_fallback" };
 }
+async function getH3MapFromUnityCatalog(limit = 80) {
+  const rows = await runSqlRows(
+    `
+    SELECT
+      state_name,
+      district_name,
+      centroid_latitude,
+      centroid_longitude,
+      water_burden_score,
+      medical_desert_score,
+      neelu_priority_score,
+      data_completeness_score,
+      affected_habitation_count,
+      facility_count
+    FROM ${tableName("app_priority_geographies")}
+    WHERE centroid_latitude IS NOT NULL
+      AND centroid_longitude IS NOT NULL
+    ORDER BY priority_rank ASC
+    LIMIT ${Math.max(1, Math.min(250, limit))}
+    `,
+    { rowLimit: Math.max(1, Math.min(250, limit)) }
+  );
+  return {
+    cells: rows.map((row) => {
+      const latitude = numberValue(row, "centroid_latitude");
+      const longitude = numberValue(row, "centroid_longitude");
+      const h3Cell = latLngToCell2(latitude, longitude, 8);
+      const waterContaminationScore = cleanScore(
+        numberValue(row, "water_burden_score", numberValue(row, "neelu_priority_score"))
+      );
+      const medicalDesertScore2 = cleanScore(numberValue(row, "medical_desert_score"));
+      const vulnerabilityIndex = cleanScore(
+        waterContaminationScore * medicalDesertScore2
+      );
+      return {
+        h3Cell,
+        boundary: cellToBoundary(h3Cell).map(
+          ([lat, lng]) => [lat, lng]
+        ),
+        center: { latitude, longitude },
+        quality: qualityFromScore(waterContaminationScore),
+        waterContaminationScore,
+        medicalDesertScore: medicalDesertScore2,
+        vulnerabilityIndex,
+        waterPointCount: numberValue(row, "affected_habitation_count"),
+        facilityCount: numberValue(row, "facility_count"),
+        districtName: stringValue(row, "district_name", "Unknown district"),
+        stateName: stringValue(row, "state_name", "Unknown state"),
+        dataCompletenessScore: cleanScore(
+          numberValue(row, "data_completeness_score", 1)
+        )
+      };
+    }),
+    generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+    source: "databricks_tables"
+  };
+}
+async function providerDashboardFromUnityCatalog() {
+  const [metricRows, priorityRows, symptomRows, contaminantRows, facilityRows] = await Promise.all([
+    runSqlRows(
+      `
+        SELECT
+          count(*) AS districts_tracked,
+          sum(affected_habitation_count) AS affected_habitations,
+          sum(facility_count) AS facility_count,
+          sum(hospital_count) AS hospital_count,
+          avg(neelu_priority_score) AS priority_average,
+          avg(water_burden_score) AS water_burden_average,
+          avg(medical_desert_score) AS medical_desert_average,
+          avg(data_completeness_score) AS data_completeness_average
+        FROM ${tableName("app_priority_geographies")}
+        `,
+      { rowLimit: 1 }
+    ),
+    runSqlRows(
+      `
+      SELECT
+        state_name,
+        district_name,
+        neelu_priority_score,
+        normalized_priority_score,
+        data_completeness_score,
+        join_status,
+        water_burden_score,
+        medical_desert_score,
+        affected_habitation_count,
+        facility_count,
+        hospital_count,
+        dominant_quality_parameter
+      FROM ${tableName("app_priority_geographies")}
+      ORDER BY priority_rank ASC
+      LIMIT 12
+      `,
+      { rowLimit: 12 }
+    ),
+    runSqlRows(
+      `
+      SELECT
+        CASE
+          WHEN lower(quality_parameter_key) LIKE '%arsenic%' THEN 'skin lesions'
+          WHEN lower(quality_parameter_key) LIKE '%fluoride%' THEN 'joint pain'
+          WHEN lower(quality_parameter_key) LIKE '%nitrate%' THEN 'infant illness'
+          ELSE 'diarrhea'
+        END AS symptom,
+        coalesce(quality_parameter, quality_parameter_key) AS contaminant,
+        count(*) AS reports,
+        count(DISTINCT concat_ws('|', state_key, district_key)) AS verified_signals
+      FROM ${tableName("app_water_quality_events")}
+      WHERE quality_parameter_key IS NOT NULL
+      GROUP BY symptom, contaminant
+      ORDER BY reports DESC
+      LIMIT 10
+      `,
+      { rowLimit: 10 }
+    ),
+    runSqlRows(
+      `
+      SELECT
+        coalesce(quality_parameter, quality_parameter_key) AS contaminant,
+        count(*) AS reports,
+        count(DISTINCT concat_ws('|', state_key, district_key)) AS districts
+      FROM ${tableName("app_water_quality_events")}
+      WHERE quality_parameter_key IS NOT NULL
+      GROUP BY contaminant
+      ORDER BY reports DESC
+      LIMIT 10
+      `,
+      { rowLimit: 10 }
+    ),
+    runSqlRows(
+      `
+      SELECT
+        state_name,
+        district_name,
+        facility_count,
+        hospital_count,
+        medical_desert_score
+      FROM ${tableName("app_priority_geographies")}
+      WHERE facility_count IS NOT NULL
+      ORDER BY medical_desert_score DESC, facility_count ASC
+      LIMIT 10
+      `,
+      { rowLimit: 10 }
+    )
+  ]);
+  const metrics = metricRows[0] ?? {};
+  return {
+    metrics: {
+      districtsTracked: numberValue(metrics, "districts_tracked"),
+      affectedHabitations: numberValue(metrics, "affected_habitations"),
+      facilityCount: numberValue(metrics, "facility_count"),
+      hospitalCount: numberValue(metrics, "hospital_count"),
+      priorityAverage: cleanScore(numberValue(metrics, "priority_average")),
+      waterBurdenAverage: cleanScore(numberValue(metrics, "water_burden_average")),
+      medicalDesertAverage: cleanScore(
+        numberValue(metrics, "medical_desert_average")
+      ),
+      dataCompletenessAverage: cleanScore(
+        numberValue(metrics, "data_completeness_average", 1)
+      )
+    },
+    priorityGeographies: priorityRows.map((row) => ({
+      stateName: stringValue(row, "state_name", "Unknown state"),
+      districtName: stringValue(row, "district_name", "Unknown district"),
+      neeluPriorityScore: cleanScore(numberValue(row, "neelu_priority_score")),
+      normalizedPriorityScore: cleanScore(
+        numberValue(row, "normalized_priority_score")
+      ),
+      dataCompletenessScore: cleanScore(
+        numberValue(row, "data_completeness_score", 1)
+      ),
+      joinStatus: stringValue(row, "join_status", "unknown"),
+      waterBurdenScore: cleanScore(numberValue(row, "water_burden_score")),
+      medicalDesertScore: cleanScore(numberValue(row, "medical_desert_score")),
+      affectedHabitationCount: numberValue(row, "affected_habitation_count"),
+      facilityCount: numberValue(row, "facility_count"),
+      hospitalCount: numberValue(row, "hospital_count"),
+      dominantQualityParameter: stringValue(
+        row,
+        "dominant_quality_parameter",
+        "unknown"
+      )
+    })),
+    symptomCorrelations: symptomRows.map((row) => ({
+      symptom: stringValue(row, "symptom", "symptom report"),
+      contaminant: stringValue(row, "contaminant", "water contaminant"),
+      reports: numberValue(row, "reports"),
+      verifiedSignals: numberValue(row, "verified_signals")
+    })),
+    contaminantBurden: contaminantRows.map((row) => ({
+      contaminant: stringValue(row, "contaminant", "water contaminant"),
+      reports: numberValue(row, "reports"),
+      districts: numberValue(row, "districts")
+    })),
+    facilityAccess: facilityRows.map((row) => ({
+      stateName: stringValue(row, "state_name", "Unknown state"),
+      districtName: stringValue(row, "district_name", "Unknown district"),
+      facilities: numberValue(row, "facility_count"),
+      hospitals: numberValue(row, "hospital_count"),
+      medicalDesertScore: cleanScore(numberValue(row, "medical_desert_score"))
+    })),
+    coverage: [
+      {
+        label: "Data completeness",
+        value: cleanScore(numberValue(metrics, "data_completeness_average", 1))
+      },
+      {
+        label: "Water burden",
+        value: cleanScore(numberValue(metrics, "water_burden_average"))
+      },
+      {
+        label: "Medical desert",
+        value: cleanScore(numberValue(metrics, "medical_desert_average"))
+      },
+      {
+        label: "Priority index",
+        value: cleanScore(numberValue(metrics, "priority_average"))
+      }
+    ]
+  };
+}
 function unityCatalogCapability() {
-  const { ucCatalog, ucSchema } = config.databricks;
-  const configured = Boolean(ucCatalog);
+  const { ucCatalog, ucSchema, warehouseId } = config.databricks;
+  if (config.localSim) {
+    return {
+      service: "unity_catalog",
+      status: "local_fallback",
+      detail: "LOCAL_SIM=true; using seeded source data"
+    };
+  }
+  if (!warehouseId) {
+    return {
+      service: "unity_catalog",
+      status: "error",
+      detail: missingDatabricksDetail("Unity Catalog", "DATABRICKS_WAREHOUSE_ID")
+    };
+  }
+  if (!ucCatalog || !ucSchema) {
+    return {
+      service: "unity_catalog",
+      status: "error",
+      detail: missingDatabricksDetail("Unity Catalog", "UC_CATALOG and UC_SCHEMA")
+    };
+  }
   return {
     service: "unity_catalog",
-    status: "local_fallback",
-    detail: configured ? `UC ${ucCatalog}.${ucSchema ?? "?"} configured; live reads not yet implemented, using seeded source data` : "Seeded source data (no Unity Catalog configured)"
+    status: "connected",
+    detail: `Reading ${ucCatalog}.${ucSchema} through SQL warehouse ${warehouseId}`
   };
 }
 
 // src/server/databricks/capabilities.ts
 function lakebaseCapability(db) {
+  if (db.kind === "lakebase") {
+    return {
+      service: "lakebase",
+      status: "connected",
+      detail: "Connected to Lakebase via Databricks App postgres resource"
+    };
+  }
   if (db.kind === "postgres") {
     return {
       service: "lakebase",
@@ -1309,6 +2460,39 @@ async function probeCapabilities(db) {
     modelCapability(),
     mlflowCapability()
   ];
+}
+
+// src/server/databricks/secrets.ts
+var GOOGLE_MAPS_RESOURCE_ENV = "google-maps-api-key";
+var GOOGLE_MAPS_SECRET_SCOPE = process.env.GOOGLE_MAPS_SECRET_SCOPE ?? "neelu";
+var GOOGLE_MAPS_SECRET_KEY = process.env.GOOGLE_MAPS_SECRET_KEY ?? "google-maps-api-key";
+var cachedGoogleMapsApiKey;
+function directGoogleMapsApiKey() {
+  const key = process.env.GOOGLE_MAPS_API_KEY ?? process.env.GOOGLE_MAPS_KEY ?? process.env[GOOGLE_MAPS_RESOURCE_ENV];
+  return key?.trim() || void 0;
+}
+function decodeSecretValue(value) {
+  if (!value) return null;
+  const decoded = Buffer.from(value, "base64").toString("utf8").trim();
+  return decoded || null;
+}
+async function getGoogleMapsApiKey() {
+  if (cachedGoogleMapsApiKey !== void 0) return cachedGoogleMapsApiKey;
+  const direct = directGoogleMapsApiKey();
+  if (direct) {
+    cachedGoogleMapsApiKey = direct;
+    return cachedGoogleMapsApiKey;
+  }
+  if (config.localSim) {
+    cachedGoogleMapsApiKey = null;
+    return cachedGoogleMapsApiKey;
+  }
+  const secret = await getWorkspaceClient().secrets.getSecret({
+    scope: GOOGLE_MAPS_SECRET_SCOPE,
+    key: GOOGLE_MAPS_SECRET_KEY
+  });
+  cachedGoogleMapsApiKey = decodeSecretValue(secret.value);
+  return cachedGoogleMapsApiKey;
 }
 
 // src/server/services/signals.ts
@@ -1375,40 +2559,6 @@ function buildNotices(theCase, system) {
     ].join("\n")
   };
   return [english, hindi];
-}
-
-// src/agents/safety.ts
-var HUMAN_APPROVAL_STATEMENT = "Human approval is required before any action is taken.";
-var FORBIDDEN_COMPLIANCE_PATTERNS = [
-  /certif\w*\s+complian/iu,
-  /compliance\s+certif/iu,
-  /legally\s+complian/iu,
-  /guarantee[sd]?\s+complian/iu,
-  /meets\s+all\s+(regulations|requirements)/iu,
-  /officially\s+(safe|compliant)/iu
-];
-function containsComplianceClaim(text) {
-  return FORBIDDEN_COMPLIANCE_PATTERNS.some((pattern) => pattern.test(text));
-}
-function checkFindingSafety(input) {
-  const violations = [];
-  if (input.citations.length === 0) {
-    violations.push("Finding has no supporting citations.");
-  }
-  if (!input.recommendation.includes(HUMAN_APPROVAL_STATEMENT)) {
-    violations.push("Recommendation does not state human approval is required.");
-  }
-  const combined = `${input.findingText} ${input.recommendation}`;
-  if (containsComplianceClaim(combined)) {
-    violations.push("Finding contains a prohibited compliance certification claim.");
-  }
-  return { ok: violations.length === 0, violations };
-}
-function withApprovalStatement(recommendation) {
-  if (recommendation.includes(HUMAN_APPROVAL_STATEMENT)) return recommendation;
-  const trimmed = recommendation.trim();
-  const sep = trimmed.endsWith(".") ? " " : ". ";
-  return `${trimmed}${sep}${HUMAN_APPROVAL_STATEMENT}`;
 }
 
 // src/evals/scorers.ts
@@ -1523,26 +2673,27 @@ function buildCaseTrace(detail, audit) {
   ).length;
   const citationsUsed = detail.finding?.citationsJson.length ?? 0;
   const traceId = detail.finding?.traceId ?? "trace-unavailable";
+  const databricksLive = !config.localSim;
   const toolCalls = [
     {
       tool: "lookup_site_profile",
       input: { system_id: detail.system.systemId },
       summary: `Loaded site profile for ${detail.system.name}`,
-      fallback: true,
+      fallback: !databricksLive,
       durationMs: 6
     },
     {
       tool: "search_guidance",
       input: { contaminant: detail.case.contaminant ?? "n/a" },
       summary: `Retrieved ${guidanceCount} guidance snippet(s)`,
-      fallback: true,
+      fallback: !databricksLive,
       durationMs: 21
     },
     {
       tool: "classify_signal",
       input: { signal_id: detail.signal.signalId },
       summary: `Classified severity=${detail.case.severity ?? "?"}, uncertainty=${detail.case.uncertainty ?? "?"}`,
-      fallback: true,
+      fallback: !databricksLive,
       durationMs: 12
     },
     {
@@ -1584,7 +2735,7 @@ function buildCaseTrace(detail, audit) {
   return {
     traceId,
     caseId: detail.case.caseId,
-    source: "local_fallback",
+    source: databricksLive ? "mlflow" : "local_fallback",
     toolCalls,
     retrievedGuidanceCount: guidanceCount,
     citationsUsed,
@@ -2154,54 +3305,498 @@ async function analyzeCase(db, caseId, actor) {
   return detail;
 }
 
-// src/shared/schemas.ts
-import { z } from "zod";
-var isoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/u, "Expected a YYYY-MM-DD date");
-var dateOrDateTime = z.string().refine((value) => !Number.isNaN(Date.parse(value)), "Expected a valid date");
-var createSignalSchema = z.object({
-  systemId: z.string().min(1, "Select a water system"),
-  signalType: z.string().min(1).max(60).default("field_test"),
-  testType: z.enum(TEST_TYPES),
-  resultValue: z.coerce.number().refine((value) => Number.isFinite(value), "Enter a numeric result"),
-  unit: z.string().min(1, "Unit is required").max(20),
-  kitId: z.string().max(60).optional().nullable(),
-  kitExpiresAt: isoDate.optional().nullable(),
-  locationLabel: z.string().max(200).optional().nullable(),
-  notes: z.string().max(2e3).optional().nullable(),
-  photoRef: z.string().max(300).optional().nullable(),
-  submittedBy: z.string().min(1).max(120).optional()
-});
-var analyzeSchema = z.object({
-  actor: z.string().min(1).max(120).optional()
-}).default({});
-var approveSchema = z.object({
-  approver: z.string().min(1, "Approver name is required").max(120),
-  rationale: z.string().min(1, "A rationale is required").max(2e3)
-});
-var overrideSchema = z.object({
-  approver: z.string().min(1, "Approver name is required").max(120),
-  rationale: z.string().min(1, "An override rationale is required").max(2e3),
-  replacementAction: z.string().min(1, "A replacement action is required").max(2e3)
-});
-var requestMoreEvidenceSchema = z.object({
-  approver: z.string().min(1).max(120).optional(),
-  requestedEvidence: z.string().min(1, "Describe the evidence you need").max(2e3),
-  owner: z.string().min(1, "Assign an owner").max(120),
-  dueAt: dateOrDateTime
-});
-var demoResetSchema = z.object({
-  scenario: z.string().min(1).max(120).optional(),
-  seed: z.coerce.number().int().optional(),
-  focusScenario: z.enum(SCENARIO_IDS).optional()
-}).default({});
+// src/server/services/mobileWorkflows.ts
+import { cellToBoundary as cellToBoundary2, cellToLatLng, latLngToCell as latLngToCell3 } from "h3-js";
+var QUALITY_SCORE = {
+  clean: 0.15,
+  caution: 0.55,
+  contaminated: 0.95
+};
+var providerDashboardCache = null;
+var PROVIDER_DASHBOARD_CACHE_MS = 6e4;
+function isVoiceInput(input) {
+  return typeof input === "object" && input !== null && "transcript" in input && (!("testType" in input) || input.mode === "voice");
+}
+function memoParts(memo) {
+  const match = memo.match(
+    /^SYS_([A-Za-z0-9-]+)_REPORT_(LOW|MODERATE|HIGH|URGENT)$/u
+  );
+  if (!match) {
+    throw new BadRequestError(
+      "UPI transaction memo must match SYS_[SYSTEM_ID]_REPORT_[SEVERITY]"
+    );
+  }
+  return {
+    systemId: match[1],
+    severity: match[2].toLowerCase()
+  };
+}
+async function submitVoiceSignal(db, input) {
+  const rag = await retrieveRagContext(input.transcript, { limit: 4 });
+  const parsedResult = await parseSignalWithModel({
+    transcript: input.transcript,
+    systemId: input.systemId,
+    contextSnippets: rag.results.map((result2) => result2.snippet)
+  });
+  if (!parsedResult.available) {
+    throw new BadRequestError(parsedResult.reason);
+  }
+  const parsed = parsedResult.parsed;
+  const system = await getSystem(db, parsed.systemId);
+  if (!system) throw new NotFoundError(`System ${parsed.systemId} not found`);
+  const threshold = CONTAMINANT_THRESHOLDS[parsed.testType];
+  const signal = await insertSignal(db, {
+    systemId: parsed.systemId,
+    signalType: "voice_report",
+    testType: parsed.testType,
+    resultValue: parsed.resultValue,
+    unit: parsed.unit,
+    thresholdValue: threshold.thresholdValue,
+    thresholdUnit: threshold.thresholdUnit,
+    locationLabel: parsed.locationLabel ?? input.h3Cell ?? null,
+    notes: input.transcript,
+    photoRef: input.photoRef ?? null,
+    synthetic: true,
+    payloadJson: {
+      receivedVia: "citizen-voice",
+      parsed,
+      rag,
+      latitude: input.latitude ?? null,
+      longitude: input.longitude ?? null,
+      h3Cell: input.h3Cell ?? (input.latitude != null && input.longitude != null ? latLngToCell3(input.latitude, input.longitude, 8) : null)
+    }
+  });
+  await writeAuditEvent(db, {
+    entityType: "signal",
+    entityId: signal.signalId,
+    actor: input.actor,
+    action: "signal_submitted",
+    after: signal
+  });
+  await writeAuditEvent(db, {
+    entityType: "signal",
+    entityId: signal.signalId,
+    actor: "voice-extraction-agent",
+    action: "voice_signal_parsed",
+    after: parsed
+  });
+  const theCase = await insertCase(db, {
+    systemId: parsed.systemId,
+    signalId: signal.signalId,
+    status: "awaiting_approval",
+    severity: parsed.severity,
+    contaminant: parsed.contaminant,
+    summary: parsed.summary,
+    uncertainty: parsed.uncertainty
+  });
+  await writeAuditEvent(db, {
+    entityType: "case",
+    entityId: theCase.caseId,
+    actor: "voice-extraction-agent",
+    action: "case_created",
+    after: theCase
+  });
+  const task = await insertTask(db, {
+    caseId: theCase.caseId,
+    title: `Inspect ${system.name}`,
+    description: [
+      `Citizen voice report: ${parsed.summary}`,
+      parsed.symptoms.length ? `Reported symptoms: ${parsed.symptoms.join(", ")}` : null,
+      `Suspected issue: ${parsed.contaminant}`
+    ].filter(Boolean).join("\n"),
+    owner: "contractor-triage",
+    status: "open"
+  });
+  await writeAuditEvent(db, {
+    entityType: "task",
+    entityId: task.taskId,
+    actor: "voice-extraction-agent",
+    action: "tasks_created",
+    after: task
+  });
+  await insertEvidence(db, {
+    caseId: theCase.caseId,
+    evidenceType: "voice_note",
+    title: "Citizen voice transcript",
+    body: input.transcript,
+    sourceName: "Citizen mobile portal",
+    confidence: parsed.confidence
+  });
+  await writeAuditEvent(db, {
+    entityType: "case",
+    entityId: theCase.caseId,
+    actor: "vector-search-rag",
+    action: "guidance_retrieved",
+    after: rag
+  });
+  const detail = await getCaseDetail(db, theCase.caseId);
+  if (!detail) throw new NotFoundError(`Case ${theCase.caseId} not found`);
+  return detail;
+}
+async function handleUpiCallback(db, input) {
+  const memo = input.memo ?? input.tn ?? "";
+  const parsed = memoParts(memo);
+  const system = await getSystem(db, parsed.systemId);
+  if (!system) throw new NotFoundError(`System ${parsed.systemId} not found`);
+  const threshold = CONTAMINANT_THRESHOLDS.total_coliform;
+  const signal = await insertSignal(db, {
+    systemId: parsed.systemId,
+    signalType: "upi_report",
+    testType: "total_coliform",
+    resultValue: 1,
+    unit: threshold.unit,
+    thresholdValue: threshold.thresholdValue,
+    thresholdUnit: threshold.thresholdUnit,
+    notes: `UPI scan-to-report memo: ${memo}`,
+    synthetic: true,
+    payloadJson: {
+      transactionId: input.transactionId,
+      memo,
+      amount: input.amount ?? null
+    }
+  });
+  const theCase = await insertCase(db, {
+    systemId: parsed.systemId,
+    signalId: signal.signalId,
+    status: "awaiting_approval",
+    severity: parsed.severity,
+    contaminant: "unverified citizen water quality report",
+    summary: `UPI scan-to-report created a ${parsed.severity} review case for ${system.name}.`,
+    uncertainty: "high"
+  });
+  const task = await insertTask(db, {
+    caseId: theCase.caseId,
+    title: `Inspect ${system.name}`,
+    description: "Physical fountain QR scan opened an unverified citizen water-quality issue. Inspect the point, capture a field note, and route findings to provider review.",
+    owner: "contractor-triage",
+    status: "open"
+  });
+  await writeAuditEvent(db, {
+    entityType: "signal",
+    entityId: signal.signalId,
+    actor: input.actor,
+    action: "upi_callback_received",
+    after: {
+      transactionId: input.transactionId,
+      memo,
+      signalId: signal.signalId
+    }
+  });
+  await writeAuditEvent(db, {
+    entityType: "case",
+    entityId: theCase.caseId,
+    actor: input.actor,
+    action: "case_created",
+    after: theCase
+  });
+  await writeAuditEvent(db, {
+    entityType: "task",
+    entityId: task.taskId,
+    actor: input.actor,
+    action: "tasks_created",
+    after: task
+  });
+  return {
+    transactionId: input.transactionId,
+    systemId: parsed.systemId,
+    severity: parsed.severity,
+    caseId: theCase.caseId,
+    signalId: signal.signalId
+  };
+}
+async function contractorQueue(db) {
+  return listContractorQueue(db);
+}
+async function completeTask(db, taskId, input) {
+  const beforeTask = await getTask(db, taskId);
+  if (!beforeTask) throw new NotFoundError(`Task ${taskId} not found`);
+  const beforeCase = await getCase(db, beforeTask.caseId);
+  if (!beforeCase)
+    throw new NotFoundError(`Case ${beforeTask.caseId} not found`);
+  const task = await updateTask(db, taskId, {
+    status: "done",
+    description: [beforeTask.description, input.notes].filter(Boolean).join("\n\n") || null
+  });
+  const theCase = await updateCase(db, beforeTask.caseId, {
+    status: "awaiting_approval"
+  });
+  await writeAuditEvent(db, {
+    entityType: "task",
+    entityId: task.taskId,
+    actor: input.actor,
+    action: "task_completed",
+    before: beforeTask,
+    after: { ...task, photoRef: input.photoRef ?? null }
+  });
+  await writeAuditEvent(db, {
+    entityType: "case",
+    entityId: theCase.caseId,
+    actor: input.actor,
+    action: "status_changed",
+    before: beforeCase,
+    after: theCase
+  });
+  const detail = await getCaseDetail(db, beforeTask.caseId);
+  if (!detail) throw new NotFoundError(`Case ${beforeTask.caseId} not found`);
+  return detail;
+}
+async function assignTask(db, taskId, input) {
+  const beforeTask = await getTask(db, taskId);
+  if (!beforeTask) throw new NotFoundError(`Task ${taskId} not found`);
+  const task = await updateTask(db, taskId, {
+    owner: input.owner,
+    status: "in_progress"
+  });
+  await writeAuditEvent(db, {
+    entityType: "task",
+    entityId: task.taskId,
+    actor: input.actor,
+    action: "task_assigned",
+    before: beforeTask,
+    after: task
+  });
+  const detail = await getCaseDetail(db, task.caseId);
+  if (!detail) throw new NotFoundError(`Case ${task.caseId} not found`);
+  return detail;
+}
+async function reviewCase(db, caseId, input) {
+  const before = await getCase(db, caseId);
+  if (!before) throw new NotFoundError(`Case ${caseId} not found`);
+  const updated = await updateCase(db, caseId, {
+    severity: input.severity ?? before.severity,
+    assignedTo: input.assignTo ?? before.assignedTo
+  });
+  await writeAuditEvent(db, {
+    entityType: "health_review",
+    entityId: caseId,
+    actor: input.actor,
+    action: input.severity && input.severity !== before.severity ? "severity_adjusted" : "health_review_recorded",
+    before,
+    after: {
+      updated,
+      rationale: input.rationale,
+      recommendation: input.recommendation ?? null
+    }
+  });
+  if (input.assignTo) {
+    await insertTask(db, {
+      caseId,
+      title: "Provider-assigned repair follow-up",
+      description: input.recommendation ?? "Review provider notes and complete assigned repair.",
+      owner: input.assignTo,
+      status: "open"
+    });
+  }
+  const detail = await getCaseDetail(db, caseId);
+  if (!detail) throw new NotFoundError(`Case ${caseId} not found`);
+  return detail;
+}
+async function processSyncBatch(db, input) {
+  const results = [];
+  let accepted = 0;
+  let skipped = 0;
+  for (const item of input.items) {
+    const existing = await findSyncEvent(db, input.batchId, item.clientId);
+    if (existing) {
+      skipped += 1;
+      results.push({
+        clientId: item.clientId,
+        status: "skipped",
+        entityId: existing.entityId
+      });
+      continue;
+    }
+    if (item.kind === "citizen_report") {
+      const detail = await submitVoiceSignal(db, { mode: "voice", ...item });
+      await insertSyncEvent(db, {
+        batchId: input.batchId,
+        clientId: item.clientId,
+        itemKind: item.kind,
+        entityId: detail.case.caseId,
+        payloadJson: item
+      });
+      results.push({
+        clientId: item.clientId,
+        status: "processed",
+        entityId: detail.case.caseId
+      });
+    } else {
+      const detail = await completeTask(db, item.taskId, item);
+      await insertSyncEvent(db, {
+        batchId: input.batchId,
+        clientId: item.clientId,
+        itemKind: item.kind,
+        entityId: item.taskId,
+        payloadJson: item
+      });
+      results.push({
+        clientId: item.clientId,
+        status: "processed",
+        entityId: detail.case.caseId
+      });
+    }
+    accepted += 1;
+  }
+  await writeAuditEvent(db, {
+    entityType: "sync_batch",
+    entityId: input.batchId,
+    actor: input.source,
+    action: "sync_batch_processed",
+    after: { accepted, skipped, count: input.items.length }
+  });
+  return { batchId: input.batchId, accepted, skipped, results };
+}
+function medicalDesertScore(latitude) {
+  return Math.min(0.95, Math.max(0.25, 0.35 + Math.abs(latitude - 23) / 32));
+}
+async function getH3Map(db, query) {
+  if (!config.localSim) {
+    return getH3MapFromUnityCatalog(query.limit ?? 80);
+  }
+  const points = await listWaterPoints(db);
+  const grouped = /* @__PURE__ */ new Map();
+  for (const point of points) {
+    grouped.set(point.h3Cell, [...grouped.get(point.h3Cell) ?? [], point]);
+  }
+  const cells = [...grouped.entries()].map(
+    ([h3Cell, cellPoints]) => {
+      const [latitude, longitude] = cellToLatLng(h3Cell);
+      const contamination = Math.max(
+        ...cellPoints.map((point) => QUALITY_SCORE[point.quality]),
+        0.15
+      );
+      const desert = medicalDesertScore(latitude);
+      const quality = contamination > 0.75 ? "contaminated" : contamination > 0.35 ? "caution" : "clean";
+      return {
+        h3Cell,
+        boundary: cellToBoundary2(h3Cell).map(
+          ([lat, lng]) => [lat, lng]
+        ),
+        center: { latitude, longitude },
+        quality,
+        waterContaminationScore: Number(contamination.toFixed(3)),
+        medicalDesertScore: Number(desert.toFixed(3)),
+        vulnerabilityIndex: Number((contamination * desert).toFixed(3)),
+        waterPointCount: cellPoints.length,
+        facilityCount: quality === "contaminated" ? 0 : 1,
+        districtName: cellPoints[0]?.name.split(" ")[0] ?? "Spoof district",
+        stateName: "India spoof",
+        dataCompletenessScore: 1
+      };
+    }
+  );
+  return { cells, generatedAt: (/* @__PURE__ */ new Date()).toISOString(), source: "local_sim" };
+}
+async function providerDashboard(db) {
+  const now = Date.now();
+  if (providerDashboardCache && providerDashboardCache.expiresAt > now) {
+    return providerDashboardCache.value;
+  }
+  if (!config.localSim) {
+    const value2 = await providerDashboardFromUnityCatalog();
+    providerDashboardCache = {
+      value: value2,
+      expiresAt: now + PROVIDER_DASHBOARD_CACHE_MS
+    };
+    return value2;
+  }
+  const h3 = await getH3Map(db, { limit: 20 });
+  const totalHabitations = h3.cells.reduce(
+    (sum, cell) => sum + cell.waterPointCount,
+    0
+  );
+  const totalFacilities = h3.cells.reduce(
+    (sum, cell) => sum + cell.facilityCount,
+    0
+  );
+  const average = (values) => values.length ? Number((values.reduce((sum, value2) => sum + value2, 0) / values.length).toFixed(3)) : 0;
+  const value = {
+    metrics: {
+      districtsTracked: h3.cells.length,
+      affectedHabitations: totalHabitations,
+      facilityCount: totalFacilities,
+      hospitalCount: Math.round(totalFacilities * 0.35),
+      priorityAverage: average(h3.cells.map((cell) => cell.vulnerabilityIndex)),
+      waterBurdenAverage: average(
+        h3.cells.map((cell) => cell.waterContaminationScore)
+      ),
+      medicalDesertAverage: average(
+        h3.cells.map((cell) => cell.medicalDesertScore)
+      ),
+      dataCompletenessAverage: 1
+    },
+    priorityGeographies: h3.cells.sort((a, b) => b.vulnerabilityIndex - a.vulnerabilityIndex).slice(0, 8).map((cell) => ({
+      stateName: cell.stateName,
+      districtName: cell.districtName,
+      neeluPriorityScore: cell.vulnerabilityIndex,
+      normalizedPriorityScore: cell.waterContaminationScore,
+      dataCompletenessScore: cell.dataCompletenessScore,
+      joinStatus: "spoof_complete",
+      waterBurdenScore: cell.waterContaminationScore,
+      medicalDesertScore: cell.medicalDesertScore,
+      affectedHabitationCount: cell.waterPointCount,
+      facilityCount: cell.facilityCount,
+      hospitalCount: Math.round(cell.facilityCount * 0.35),
+      dominantQualityParameter: cell.quality
+    })),
+    symptomCorrelations: [
+      {
+        symptom: "diarrhea",
+        contaminant: "coliform bacteria",
+        reports: 18,
+        verifiedSignals: 9
+      },
+      {
+        symptom: "skin lesions",
+        contaminant: "arsenic",
+        reports: 7,
+        verifiedSignals: 3
+      },
+      {
+        symptom: "stomach pain",
+        contaminant: "turbidity",
+        reports: 11,
+        verifiedSignals: 4
+      }
+    ],
+    contaminantBurden: [
+      { contaminant: "Iron", reports: 302242, districts: 348 },
+      { contaminant: "Fluoride", reports: 101040, districts: 308 },
+      { contaminant: "Arsenic", reports: 25705, districts: 83 }
+    ],
+    facilityAccess: h3.cells.slice(0, 8).map((cell) => ({
+      stateName: cell.stateName,
+      districtName: cell.districtName,
+      facilities: cell.facilityCount,
+      hospitals: Math.round(cell.facilityCount * 0.35),
+      medicalDesertScore: cell.medicalDesertScore
+    })),
+    coverage: [
+      { label: "Data completeness", value: 1 },
+      { label: "Water burden", value: average(h3.cells.map((cell) => cell.waterContaminationScore)) },
+      { label: "Medical desert", value: average(h3.cells.map((cell) => cell.medicalDesertScore)) },
+      { label: "Priority index", value: average(h3.cells.map((cell) => cell.vulnerabilityIndex)) }
+    ]
+  };
+  providerDashboardCache = {
+    value,
+    expiresAt: now + PROVIDER_DASHBOARD_CACHE_MS
+  };
+  return value;
+}
 
 // src/server/routes/api.ts
 var apiRouter = Router();
+apiRouter.get("/client-config", async (_req, res) => {
+  ok(res, {
+    googleMapsApiKey: await getGoogleMapsApiKey()
+  });
+});
 apiRouter.get("/health", async (_req, res) => {
   const db = await getDb();
   const services = await probeCapabilities(db);
   const health = {
-    ok: true,
+    ok: !services.some((service) => service.status === "error"),
     mode: config.mode,
     version: config.version,
     services,
@@ -2219,8 +3814,12 @@ apiRouter.get("/signals", async (_req, res) => {
 });
 apiRouter.post("/signals", async (req, res) => {
   const db = await getDb();
-  const input = parse(createSignalSchema, req.body);
-  const signal = await submitSignal(db, input);
+  const input = parse(signalIntakeSchema, req.body);
+  if (isVoiceInput(input)) {
+    ok(res, await submitVoiceSignal(db, input), 201);
+    return;
+  }
+  const signal = await submitSignal(db, parse(createSignalSchema, input));
   ok(res, signal, 201);
 });
 apiRouter.get("/signals/:id", async (req, res) => {
@@ -2242,7 +3841,11 @@ apiRouter.get("/signals/:id", async (req, res) => {
 apiRouter.post("/signals/:id/analyze", async (req, res) => {
   const db = await getDb();
   const { actor } = parse(analyzeSchema, req.body ?? {});
-  const detail = await analyzeSignal(db, req.params.id, actor ?? DEFAULT_OPS_ACTOR);
+  const detail = await analyzeSignal(
+    db,
+    req.params.id,
+    actor ?? DEFAULT_OPS_ACTOR
+  );
   ok(res, detail, 201);
 });
 apiRouter.get("/cases", async (_req, res) => {
@@ -2258,7 +3861,11 @@ apiRouter.get("/cases/:id", async (req, res) => {
 apiRouter.post("/cases/:id/analyze", async (req, res) => {
   const db = await getDb();
   const { actor } = parse(analyzeSchema, req.body ?? {});
-  const detail = await analyzeCase(db, req.params.id, actor ?? DEFAULT_OPS_ACTOR);
+  const detail = await analyzeCase(
+    db,
+    req.params.id,
+    actor ?? DEFAULT_OPS_ACTOR
+  );
   ok(res, detail);
 });
 apiRouter.post("/cases/:id/approve", async (req, res) => {
@@ -2276,6 +3883,11 @@ apiRouter.post("/cases/:id/request-more-evidence", async (req, res) => {
   const input = parse(requestMoreEvidenceSchema, req.body);
   ok(res, await requestMoreEvidence(db, req.params.id, input));
 });
+apiRouter.post("/cases/:id/review", async (req, res) => {
+  const db = await getDb();
+  const input = parse(reviewCaseSchema, req.body);
+  ok(res, await reviewCase(db, req.params.id, input));
+});
 apiRouter.get("/cases/:id/audit", async (req, res) => {
   const db = await getDb();
   const detail = await getCaseDetail(db, req.params.id);
@@ -2287,6 +3899,47 @@ apiRouter.get("/cases/:id/trace", async (req, res) => {
   const trace = await getCaseTrace(db, req.params.id);
   if (!trace) throw new NotFoundError(`Case ${req.params.id} not found`);
   ok(res, trace);
+});
+apiRouter.post("/upi/callback", async (req, res) => {
+  const db = await getDb();
+  const input = parse(upiCallbackSchema, req.body);
+  ok(res, await handleUpiCallback(db, input), 201);
+});
+apiRouter.post("/sync", async (req, res) => {
+  const db = await getDb();
+  const input = parse(syncBatchSchema, req.body);
+  ok(res, await processSyncBatch(db, input), 201);
+});
+apiRouter.get("/h3-map", async (req, res) => {
+  const db = await getDb();
+  const input = parse(h3MapQuerySchema, req.query);
+  ok(res, await getH3Map(db, input));
+});
+apiRouter.get("/contractor/tasks", async (_req, res) => {
+  const db = await getDb();
+  ok(res, await contractorQueue(db));
+});
+apiRouter.post("/contractor/tasks/:id/done", async (req, res) => {
+  const db = await getDb();
+  const input = parse(completeTaskSchema, req.body);
+  ok(res, await completeTask(db, req.params.id, input));
+});
+apiRouter.post("/contractor/tasks/:id/assign", async (req, res) => {
+  const db = await getDb();
+  const input = parse(assignTaskSchema, req.body);
+  ok(res, await assignTask(db, req.params.id, input));
+});
+apiRouter.get("/provider/dashboard", async (_req, res) => {
+  const db = await getDb();
+  ok(res, await providerDashboard(db));
+});
+apiRouter.get("/provider/insights", async (_req, res) => {
+  const db = await getDb();
+  const [dashboard, cases] = await Promise.all([
+    providerDashboard(db),
+    listCases(db)
+  ]);
+  ok(res, await generateProviderInsightWithModel(dashboard, cases));
 });
 apiRouter.post("/demo/reset", async (req, res) => {
   const db = await getDb();

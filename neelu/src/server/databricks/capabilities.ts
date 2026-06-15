@@ -4,26 +4,34 @@
  * Databricks resource or running on a local fallback.
  */
 
-import type { Db } from "../db";
-import { aiSearchCapability } from "./aiSearch";
-import { modelCapability } from "./modelServing";
-import { mlflowCapability } from "./mlflow";
-import { unityCatalogCapability } from "./unityCatalog";
-import type { ServiceCapability } from "../../shared/types";
+import type { Db } from "../db"
+import { aiSearchCapability } from "./aiSearch"
+import { modelCapability } from "./modelServing"
+import { mlflowCapability } from "./mlflow"
+import { unityCatalogCapability } from "./unityCatalog"
+import type { ServiceCapability } from "../../shared/types"
 
 export function lakebaseCapability(db: Db): ServiceCapability {
+  if (db.kind === "lakebase") {
+    return {
+      service: "lakebase",
+      status: "connected",
+      detail: "Connected to Lakebase via Databricks App postgres resource",
+    }
+  }
   if (db.kind === "postgres") {
     return {
       service: "lakebase",
       status: "connected",
-      detail: "Connected to Postgres via DATABASE_URL (Lakebase or local Postgres)",
-    };
+      detail:
+        "Connected to Postgres via DATABASE_URL (Lakebase or local Postgres)",
+    }
   }
   return {
     service: "lakebase",
     status: "local_fallback",
     detail: "In-process PGlite Postgres (LOCAL_SIM)",
-  };
+  }
 }
 
 export async function probeCapabilities(db: Db): Promise<ServiceCapability[]> {
@@ -33,9 +41,9 @@ export async function probeCapabilities(db: Db): Promise<ServiceCapability[]> {
     aiSearchCapability(),
     modelCapability(),
     mlflowCapability(),
-  ];
+  ]
 }
 
 export function isAllLocalFallback(caps: ServiceCapability[]): boolean {
-  return caps.every((cap) => cap.status !== "connected");
+  return caps.every((cap) => cap.status !== "connected")
 }

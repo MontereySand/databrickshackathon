@@ -34,3 +34,10 @@ export class ConflictError extends AppError {
     this.name = "ConflictError";
   }
 }
+
+export class ServiceUnavailableError extends AppError {
+  constructor(message: string, details?: unknown) {
+    super(503, "service_unavailable", message, details);
+    this.name = "ServiceUnavailableError";
+  }
+}

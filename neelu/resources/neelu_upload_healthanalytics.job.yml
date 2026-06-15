@@ -1,0 +1,14 @@
+resources:
+  jobs:
+    neelu_upload_healthanalytics:
+      name: "[${bundle.target}] neelu-upload-healthanalytics"
+      description: "Loads the split Key Indicator CSV folder into workspace.hackathon tables."
+      tasks:
+        - task_key: upload_healthanalytics_csvs
+          notebook_task:
+            notebook_path: ../databricks/notebooks/upload_healthanalytics_csvs.py
+            base_parameters:
+              source_dir: ${var.healthanalytics_source_dir}
+              output_catalog: ${var.output_catalog}
+              output_schema: ${var.output_schema}
+              overwrite: "true"

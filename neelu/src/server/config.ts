@@ -25,8 +25,11 @@ export interface DatabricksConfig {
   host: string | undefined;
   token: string | undefined;
   profile: string | undefined;
+  warehouseId: string | undefined;
   modelEndpoint: string | undefined;
+  embeddingEndpoint: string | undefined;
   aiSearchIndex: string | undefined;
+  aiSearchEndpoint: string | undefined;
   ucCatalog: string | undefined;
   ucSchema: string | undefined;
   mlflowExperiment: string | undefined;
@@ -43,6 +46,7 @@ export interface AppConfig {
   databaseUrl: string | undefined;
   /** PGlite data directory (LOCAL_SIM). "memory" => ephemeral in-memory db. */
   pgliteDir: string;
+  googleMapsApiKey: string | undefined;
   databricks: DatabricksConfig;
 }
 
@@ -59,12 +63,17 @@ export const config: AppConfig = {
   version: APP_VERSION,
   databaseUrl: process.env.DATABASE_URL,
   pgliteDir: process.env.PGLITE_DATA_DIR ?? "./.data/pglite",
+  googleMapsApiKey: process.env.GOOGLE_MAPS_API_KEY,
   databricks: {
     host: process.env.DATABRICKS_HOST,
     token: process.env.DATABRICKS_TOKEN,
     profile: process.env.DATABRICKS_PROFILE,
+    warehouseId: process.env.DATABRICKS_WAREHOUSE_ID,
     modelEndpoint: process.env.MODEL_ENDPOINT_NAME,
+    embeddingEndpoint:
+      process.env.EMBEDDING_ENDPOINT_NAME ?? "databricks-gte-large-en",
     aiSearchIndex: process.env.AI_SEARCH_INDEX_NAME,
+    aiSearchEndpoint: process.env.AI_SEARCH_ENDPOINT_NAME,
     ucCatalog: process.env.UC_CATALOG,
     ucSchema: process.env.UC_SCHEMA,
     mlflowExperiment: process.env.MLFLOW_EXPERIMENT_NAME,

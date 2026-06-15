@@ -1,0 +1,16 @@
+resources:
+  jobs:
+    neelu_process_app_datasets:
+      name: "[${bundle.target}] neelu-process-app-datasets"
+      description: "Builds app-ready district, pincode, water-quality, and medical-access Delta tables for Neelu."
+      tasks:
+        - task_key: process_app_datasets
+          notebook_task:
+            notebook_path: ../databricks/notebooks/process_app_datasets.py
+            base_parameters:
+              source_catalog: ${var.source_catalog}
+              source_schema: ${var.source_schema}
+              output_catalog: ${var.output_catalog}
+              output_schema: ${var.output_schema}
+              mandatory_catalog: ${var.mandatory_catalog}
+              mandatory_schema: ${var.mandatory_schema}

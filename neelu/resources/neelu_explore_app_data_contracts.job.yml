@@ -1,0 +1,16 @@
+resources:
+  jobs:
+    neelu_explore_app_data_contracts:
+      name: "[${bundle.target}] neelu-explore-app-data-contracts"
+      description: "Profiles source tables against Neelu app data contracts before processing tables are finalized."
+      tasks:
+        - task_key: explore_app_data_contracts
+          notebook_task:
+            notebook_path: ../databricks/notebooks/explore_app_data_contracts.py
+            base_parameters:
+              source_catalog: ${var.source_catalog}
+              source_schema: ${var.source_schema}
+              output_catalog: ${var.output_catalog}
+              output_schema: ${var.output_schema}
+              mandatory_catalog: ${var.mandatory_catalog}
+              mandatory_schema: ${var.mandatory_schema}

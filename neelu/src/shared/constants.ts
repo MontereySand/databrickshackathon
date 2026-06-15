@@ -6,8 +6,8 @@
 
 // --- Runtime mode -----------------------------------------------------------
 
-export const RUNTIME_MODES = ["LOCAL_SIM", "DATABRICKS"] as const;
-export type RuntimeMode = (typeof RUNTIME_MODES)[number];
+export const RUNTIME_MODES = ["LOCAL_SIM", "DATABRICKS"] as const
+export type RuntimeMode = (typeof RUNTIME_MODES)[number]
 
 // --- Databricks-facing services (proof panel) -------------------------------
 
@@ -17,8 +17,8 @@ export const SERVICES = [
   "ai_search",
   "model_serving",
   "mlflow",
-] as const;
-export type ServiceName = (typeof SERVICES)[number];
+] as const
+export type ServiceName = (typeof SERVICES)[number]
 
 export const SERVICE_LABELS: Record<ServiceName, string> = {
   lakebase: "Lakebase (Postgres)",
@@ -26,10 +26,14 @@ export const SERVICE_LABELS: Record<ServiceName, string> = {
   ai_search: "AI Search / Vector Search",
   model_serving: "Model Serving / AI Gateway",
   mlflow: "MLflow tracing & eval",
-};
+}
 
-export const SERVICE_STATUSES = ["connected", "local_fallback", "error"] as const;
-export type ServiceStatus = (typeof SERVICE_STATUSES)[number];
+export const SERVICE_STATUSES = [
+  "connected",
+  "local_fallback",
+  "error",
+] as const
+export type ServiceStatus = (typeof SERVICE_STATUSES)[number]
 
 // --- Case lifecycle ---------------------------------------------------------
 
@@ -40,8 +44,8 @@ export const CASE_STATUSES = [
   "overridden",
   "needs_more_evidence",
   "closed",
-] as const;
-export type CaseStatus = (typeof CASE_STATUSES)[number];
+] as const
+export type CaseStatus = (typeof CASE_STATUSES)[number]
 
 export const CASE_STATUS_LABELS: Record<CaseStatus, string> = {
   new: "New",
@@ -50,32 +54,32 @@ export const CASE_STATUS_LABELS: Record<CaseStatus, string> = {
   overridden: "Overridden",
   needs_more_evidence: "Needs more evidence",
   closed: "Closed",
-};
+}
 
-export const SEVERITIES = ["low", "moderate", "high", "urgent"] as const;
-export type Severity = (typeof SEVERITIES)[number];
+export const SEVERITIES = ["low", "moderate", "high", "urgent"] as const
+export type Severity = (typeof SEVERITIES)[number]
 
 export const SEVERITY_LABELS: Record<Severity, string> = {
   low: "Low",
   moderate: "Moderate",
   high: "High",
   urgent: "Needs urgent review",
-};
+}
 
-export const UNCERTAINTY_LEVELS = ["low", "medium", "high"] as const;
-export type UncertaintyLevel = (typeof UNCERTAINTY_LEVELS)[number];
+export const UNCERTAINTY_LEVELS = ["low", "medium", "high"] as const
+export type UncertaintyLevel = (typeof UNCERTAINTY_LEVELS)[number]
 
 // --- Signals ----------------------------------------------------------------
 
 // Signals have no persisted status column; status is derived from whether a
 // case has been created for the signal yet.
-export const SIGNAL_DERIVED_STATUSES = ["received", "analyzed"] as const;
-export type SignalDerivedStatus = (typeof SIGNAL_DERIVED_STATUSES)[number];
+export const SIGNAL_DERIVED_STATUSES = ["received", "analyzed"] as const
+export type SignalDerivedStatus = (typeof SIGNAL_DERIVED_STATUSES)[number]
 
 // --- Tasks ------------------------------------------------------------------
 
-export const TASK_STATUSES = ["open", "in_progress", "blocked", "done"] as const;
-export type TaskStatus = (typeof TASK_STATUSES)[number];
+export const TASK_STATUSES = ["open", "in_progress", "blocked", "done"] as const
+export type TaskStatus = (typeof TASK_STATUSES)[number]
 
 // --- Approvals --------------------------------------------------------------
 
@@ -83,8 +87,8 @@ export const APPROVAL_DECISIONS = [
   "approved",
   "overridden",
   "more_evidence_requested",
-] as const;
-export type ApprovalDecision = (typeof APPROVAL_DECISIONS)[number];
+] as const
+export type ApprovalDecision = (typeof APPROVAL_DECISIONS)[number]
 
 // --- Evidence ---------------------------------------------------------------
 
@@ -94,8 +98,11 @@ export const EVIDENCE_TYPES = [
   "site_profile",
   "guidance",
   "prior_case",
-] as const;
-export type EvidenceType = (typeof EVIDENCE_TYPES)[number];
+  "voice_note",
+  "model_context",
+  "symptom_report",
+] as const
+export type EvidenceType = (typeof EVIDENCE_TYPES)[number]
 
 // --- Audit ------------------------------------------------------------------
 
@@ -106,25 +113,34 @@ export const ENTITY_TYPES = [
   "agent_finding",
   "task",
   "approval",
+  "sync_batch",
+  "health_review",
   "demo_run",
-] as const;
-export type EntityType = (typeof ENTITY_TYPES)[number];
+] as const
+export type EntityType = (typeof ENTITY_TYPES)[number]
 
 export const AUDIT_ACTIONS = [
   "signal_submitted",
+  "voice_signal_parsed",
+  "upi_callback_received",
   "case_created",
   "guidance_retrieved",
   "finding_generated",
   "tasks_created",
+  "task_assigned",
+  "task_completed",
   "notice_drafted",
   "evidence_attached",
   "approval_recorded",
   "override_recorded",
+  "severity_adjusted",
+  "health_review_recorded",
   "evidence_requested",
   "status_changed",
+  "sync_batch_processed",
   "demo_reset",
-] as const;
-export type AuditAction = (typeof AUDIT_ACTIONS)[number];
+] as const
+export type AuditAction = (typeof AUDIT_ACTIONS)[number]
 
 // --- Eval scorers -----------------------------------------------------------
 
@@ -135,8 +151,8 @@ export const EVAL_SCORERS = [
   "creates_required_tasks",
   "no_certified_compliance_claim",
   "writes_audit_events",
-] as const;
-export type EvalScorerName = (typeof EVAL_SCORERS)[number];
+] as const
+export type EvalScorerName = (typeof EVAL_SCORERS)[number]
 
 // --- Water test types and thresholds ----------------------------------------
 
@@ -147,25 +163,25 @@ export const TEST_TYPES = [
   "ph",
   "arsenic",
   "free_chlorine",
-] as const;
-export type TestType = (typeof TEST_TYPES)[number];
+] as const
+export type TestType = (typeof TEST_TYPES)[number]
 
-export type ThresholdDirection = "above" | "below" | "presence";
+export type ThresholdDirection = "above" | "below" | "presence"
 
 export interface ContaminantThreshold {
-  testType: TestType;
-  label: string;
-  contaminant: string;
-  unit: string;
+  testType: TestType
+  label: string
+  contaminant: string
+  unit: string
   /** Health-based reference value. For "presence" tests this is informational. */
-  thresholdValue: number;
-  thresholdUnit: string;
+  thresholdValue: number
+  thresholdUnit: string
   /** Which side of the threshold is unsafe. */
-  direction: ThresholdDirection;
+  direction: ThresholdDirection
   /** Severity assigned when the reference value is exceeded. */
-  severityWhenExceeded: Severity;
+  severityWhenExceeded: Severity
   /** Stable guidance doc id this test maps to (see server/data/guidance.ts). */
-  guidanceId: string;
+  guidanceId: string
 }
 
 /**
@@ -240,7 +256,7 @@ export const CONTAMINANT_THRESHOLDS: Record<TestType, ContaminantThreshold> = {
     severityWhenExceeded: "moderate",
     guidanceId: "guidance-chlorine",
   },
-};
+}
 
 export const TEST_TYPE_LABELS: Record<TestType, string> = {
   nitrate: "Nitrate (as N)",
@@ -249,9 +265,9 @@ export const TEST_TYPE_LABELS: Record<TestType, string> = {
   ph: "pH",
   arsenic: "Arsenic",
   free_chlorine: "Free chlorine residual",
-};
+}
 
-export const COMMON_UNITS = ["mg/L", "NTU", "CFU/100mL", "pH"] as const;
+export const COMMON_UNITS = ["mg/L", "NTU", "CFU/100mL", "pH"] as const
 
 // --- Scenario ids -----------------------------------------------------------
 
@@ -259,18 +275,18 @@ export const SCENARIO_IDS = [
   "nitrate_school",
   "coliform_expired_kit",
   "turbidity_pipe_repair",
-] as const;
-export type ScenarioId = (typeof SCENARIO_IDS)[number];
+] as const
+export type ScenarioId = (typeof SCENARIO_IDS)[number]
 
-export const PRIMARY_SCENARIO_ID: ScenarioId = "nitrate_school";
+export const PRIMARY_SCENARIO_ID: ScenarioId = "nitrate_school"
 
 // --- Demo defaults ----------------------------------------------------------
 
-export const DEFAULT_DEMO_SEED = 42;
-export const DEFAULT_DEMO_SCENARIO_NAME = "neelu-default";
+export const DEFAULT_DEMO_SEED = 42
+export const DEFAULT_DEMO_SCENARIO_NAME = "neelu-default"
 
 // --- Actors -----------------------------------------------------------------
 
-export const SYSTEM_ACTOR = "system";
-export const DEFAULT_FIELD_ACTOR = "field-worker";
-export const DEFAULT_OPS_ACTOR = "ops-user";
+export const SYSTEM_ACTOR = "system"
+export const DEFAULT_FIELD_ACTOR = "field-worker"
+export const DEFAULT_OPS_ACTOR = "ops-user"

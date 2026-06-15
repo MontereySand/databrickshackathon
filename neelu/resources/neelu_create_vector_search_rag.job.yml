@@ -1,0 +1,15 @@
+resources:
+  jobs:
+    neelu_create_vector_search_rag:
+      name: "[${bundle.target}] neelu-create-vector-search-rag"
+      description: "Creates the Neelu guidance Delta table and Databricks Vector Search RAG index."
+      tasks:
+        - task_key: create_vector_search_rag
+          notebook_task:
+            notebook_path: ../databricks/notebooks/create_vector_search_rag.py
+            base_parameters:
+              output_catalog: ${var.output_catalog}
+              output_schema: ${var.output_schema}
+              vector_search_endpoint: neelu-vector-search
+              vector_search_index: workspace.hackathon.neelu_guidance_index
+              embedding_endpoint: ${var.embedding_endpoint_name}
