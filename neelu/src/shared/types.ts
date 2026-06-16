@@ -259,6 +259,34 @@ export interface ProviderInsight {
   generatedAt: string
 }
 
+export interface ProviderAgentAction {
+  type:
+    | "analyze_signal"
+    | "open_case"
+    | "assign_task"
+    | "request_evidence"
+    | "refresh_status"
+  label: string
+  targetId: string | null
+  reason: string
+}
+
+export interface ProviderAgentChatResponse {
+  reply: string
+  mode: RuntimeMode
+  modelEndpoint: string
+  generatedAt: string
+  dataSource:
+    | "databricks"
+    | "openai"
+    | "openai_demo"
+    | "demo_model"
+    | "local_sim"
+    | "safety_net"
+  sources: string[]
+  actions: ProviderAgentAction[]
+}
+
 export interface ClientConfig {
   googleMapsApiKey: string | null
 }

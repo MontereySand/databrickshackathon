@@ -35,6 +35,11 @@ export interface DatabricksConfig {
   mlflowExperiment: string | undefined;
 }
 
+export interface OpenAiConfig {
+  apiKey: string | undefined;
+  model: string;
+}
+
 export interface AppConfig {
   mode: RuntimeMode;
   localSim: boolean;
@@ -48,6 +53,7 @@ export interface AppConfig {
   pgliteDir: string;
   googleMapsApiKey: string | undefined;
   databricks: DatabricksConfig;
+  openai: OpenAiConfig;
 }
 
 const nodeEnv = process.env.NODE_ENV ?? "development";
@@ -62,7 +68,7 @@ export const config: AppConfig = {
   ),
   version: APP_VERSION,
   databaseUrl: process.env.DATABASE_URL,
-  pgliteDir: process.env.PGLITE_DATA_DIR ?? "./.data/pglite",
+  pgliteDir: process.env.PGLITE_DATA_DIR ?? "memory",
   googleMapsApiKey: process.env.GOOGLE_MAPS_API_KEY,
   databricks: {
     host: process.env.DATABRICKS_HOST,
@@ -77,6 +83,10 @@ export const config: AppConfig = {
     ucCatalog: process.env.UC_CATALOG,
     ucSchema: process.env.UC_SCHEMA,
     mlflowExperiment: process.env.MLFLOW_EXPERIMENT_NAME,
+  },
+  openai: {
+    apiKey: process.env.OPENAI_API_KEY,
+    model: process.env.OPENAI_MODEL ?? "gpt-5.2",
   },
 };
 

@@ -16,6 +16,15 @@ import {
   taskStatusClasses,
 } from "@/client/lib/format";
 
+const CASE_STATUS_SHORT_LABELS: Record<CaseStatus, string> = {
+  new: "New",
+  awaiting_approval: "Awaiting",
+  approved: "Approved",
+  overridden: "Overridden",
+  needs_more_evidence: "Evidence",
+  closed: "Closed",
+};
+
 export function SeverityBadge({ severity }: { severity: Severity | null }) {
   return (
     <Badge variant="outline" className={cn("border", severityClasses(severity))}>
@@ -26,8 +35,12 @@ export function SeverityBadge({ severity }: { severity: Severity | null }) {
 
 export function CaseStatusBadge({ status }: { status: CaseStatus }) {
   return (
-    <Badge variant="outline" className={cn("border", statusClasses(status))}>
-      {CASE_STATUS_LABELS[status]}
+    <Badge
+      variant="outline"
+      title={CASE_STATUS_LABELS[status]}
+      className={cn("max-w-24 truncate border", statusClasses(status))}
+    >
+      {CASE_STATUS_SHORT_LABELS[status]}
     </Badge>
   );
 }

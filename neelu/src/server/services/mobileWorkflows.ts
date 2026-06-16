@@ -11,7 +11,9 @@ import {
   insertSignal,
   insertSyncEvent,
   insertTask,
+  listCases,
   listContractorQueue,
+  listSignals,
   listWaterPoints,
   updateCase,
   updateTask,
@@ -57,6 +59,25 @@ let providerDashboardCache:
   | null = null
 
 const PROVIDER_DASHBOARD_CACHE_MS = 60_000
+
+function localHierarchyForPoint(point: { systemId?: string | null; name: string }) {
+  if (point.systemId === "sys-school") {
+    return {
+      stateName: "Maharashtra Demo",
+      districtName: "Aurangabad District",
+    }
+  }
+  if (point.systemId === "sys-clinic") {
+    return {
+      stateName: "Himachal Pradesh Demo",
+      districtName: "Shimla District",
+    }
+  }
+  return {
+    stateName: "Maharashtra Demo",
+    districtName: "Paithan Village Cluster",
+  }
+}
 
 function isVoiceInput(input: unknown): input is VoiceSignalInput {
   return (
@@ -475,6 +496,7 @@ export async function getH3Map(
           : contamination > 0.35
             ? "caution"
             : "clean"
+      const hierarchy = localHierarchyForPoint(cellPoints[0] ?? { name: "" })
       return {
         h3Cell,
         boundary: cellToBoundary(h3Cell).map(
@@ -487,8 +509,8 @@ export async function getH3Map(
         vulnerabilityIndex: Number((contamination * desert).toFixed(3)),
         waterPointCount: cellPoints.length,
         facilityCount: quality === "contaminated" ? 0 : 1,
-        districtName: cellPoints[0]?.name.split(" ")[0] ?? "Spoof district",
-        stateName: "India spoof",
+        districtName: hierarchy.districtName,
+        stateName: hierarchy.stateName,
         dataCompletenessScore: 1,
       }
     }
@@ -520,6 +542,33 @@ export async function providerDashboard(db: Db): Promise<ProviderDashboard> {
     (sum, cell) => sum + cell.facilityCount,
     0
   )
+  const [signals, cases] = await Promise.all([listSignals(db), listCases(db)])
+  const contaminantCounts = new Map<string, { reports: number; districts: Set<string> }>()
+  for (const signal of signals) {
+    const key = signal.testType
+      ? CONTAMINANT_THRESHOLDS[signal.testType].contaminant
+      : signal.signalType
+    const district =
+      h3.cells.find((cell) =>
+        cell.h3Cell === (signal.payloadJson?.h3Cell as string | undefined)
+      )?.districtName ?? signal.systemName
+    const current = contaminantCounts.get(key) ?? {
+      reports: 0,
+      districts: new Set<string>(),
+    }
+    current.reports += 1
+    current.districts.add(district)
+    contaminantCounts.set(key, current)
+  }
+  for (const item of cases) {
+    if (!item.contaminant) continue
+    const current = contaminantCounts.get(item.contaminant) ?? {
+      reports: 0,
+      districts: new Set<string>(),
+    }
+    current.districts.add(item.systemName)
+    contaminantCounts.set(item.contaminant, current)
+  }
   const average = (values: number[]) =>
     values.length
       ? Number((values.reduce((sum, value) => sum + value, 0) / values.length).toFixed(3))
@@ -548,7 +597,7 @@ export async function providerDashboard(db: Db): Promise<ProviderDashboard> {
         neeluPriorityScore: cell.vulnerabilityIndex,
         normalizedPriorityScore: cell.waterContaminationScore,
         dataCompletenessScore: cell.dataCompletenessScore,
-        joinStatus: "spoof_complete",
+        joinStatus: config.localSim ? "local_synthetic" : "databricks_joined",
         waterBurdenScore: cell.waterContaminationScore,
         medicalDesertScore: cell.medicalDesertScore,
         affectedHabitationCount: cell.waterPointCount,
@@ -577,10 +626,12 @@ export async function providerDashboard(db: Db): Promise<ProviderDashboard> {
       },
     ],
     contaminantBurden: [
-      { contaminant: "Iron", reports: 302242, districts: 348 },
-      { contaminant: "Fluoride", reports: 101040, districts: 308 },
-      { contaminant: "Arsenic", reports: 25705, districts: 83 },
-    ],
+      ...[...contaminantCounts.entries()].map(([contaminant, value]) => ({
+        contaminant,
+        reports: value.reports,
+        districts: value.districts.size,
+      })),
+    ].sort((a, b) => b.reports - a.reports),
     facilityAccess: h3.cells.slice(0, 8).map((cell) => ({
       stateName: cell.stateName,
       districtName: cell.districtName,

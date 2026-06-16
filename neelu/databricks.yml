@@ -64,8 +64,8 @@ variables:
     description: Schema holding mandatory DAIS 2026 foundation datasets.
     default: virtue_foundation_dataset
   healthanalytics_source_dir:
-    description: DBFS or UC Volume directory containing the staged notes/data tree or the Key_Indicator_State_and_District_wise_data CSV folder.
-    default: dbfs:/Volumes/workspace/hackathon/raw_files/notes/data
+    description: DBFS or UC Volume directory containing the staged Healthanalytics CSV folder.
+    default: dbfs:/Volumes/workspace/hackathon/raw_files/healthanalytics
 
 targets:
   dev:

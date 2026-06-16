@@ -14,6 +14,7 @@ import type {
   H3MapResponse,
   HealthInfo,
   ProviderDashboard,
+  ProviderAgentChatResponse,
   ProviderInsight,
   Signal,
   SignalDTO,
@@ -32,6 +33,7 @@ import type {
   SyncBatchInput,
   UpiCallbackInput,
   VoiceSignalInput,
+  ProviderAgentChatInput,
 } from "@/shared/schemas"
 
 const BASE = "/api"
@@ -111,5 +113,7 @@ export const api = {
     post<CaseDetail>(`/contractor/tasks/${id}/assign`, body),
   providerDashboard: () => http<ProviderDashboard>("/provider/dashboard"),
   providerInsights: () => http<ProviderInsight>("/provider/insights"),
+  providerAgentChat: (body: ProviderAgentChatInput) =>
+    post<ProviderAgentChatResponse>("/provider/agent-chat", body),
   resetDemo: () => post<DemoResetSummary>("/demo/reset"),
 }

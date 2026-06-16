@@ -4,11 +4,11 @@
 # MAGIC
 # MAGIC This notebook creates one Delta table per CSV in a staged directory.
 # MAGIC
-# MAGIC It is intentionally separate from the app pipeline. The app should consume Databricks tables, not local `/notes/data` files.
+# MAGIC It is intentionally separate from the app pipeline. The app should consume Databricks tables, not local raw CSV files.
 # MAGIC
 # MAGIC Expected staging flow:
-# MAGIC 1. Upload/copy the local `notes/data` directory to a Databricks-readable path, preferably a UC Volume such as `/Volumes/workspace/hackathon/raw_files/notes/data`.
-# MAGIC 2. Run this notebook with `source_dir` set to either that staged `notes/data` directory or the nested `healthanalytics/Key_Indicator_State_and_District_wise_data` folder.
+# MAGIC 1. Upload/copy the Healthanalytics CSV export to a Databricks-readable path, preferably a UC Volume such as `/Volumes/workspace/hackathon/raw_files/healthanalytics`.
+# MAGIC 2. Run this notebook with `source_dir` set to either that staged folder or the nested `Key_Indicator_State_and_District_wise_data` folder.
 # MAGIC 3. Tables are written into `output_catalog.output_schema` using sanitized CSV basenames.
 
 # COMMAND ----------
@@ -23,7 +23,7 @@ from pyspark.sql import functions as F
 
 # COMMAND ----------
 
-dbutils.widgets.text("source_dir", "/Volumes/workspace/hackathon/raw_files/notes/data")
+dbutils.widgets.text("source_dir", "/Volumes/workspace/hackathon/raw_files/healthanalytics")
 dbutils.widgets.text("output_catalog", "workspace")
 dbutils.widgets.text("output_schema", "hackathon")
 dbutils.widgets.dropdown("overwrite", "true", ["true", "false"])
@@ -56,7 +56,7 @@ def resolve_healthanalytics_dir(path: str) -> str:
             pass
 
     raise ValueError(
-        "Could not find healthanalytics CSVs. Set source_dir to the staged notes/data directory "
+        "Could not find healthanalytics CSVs. Set source_dir to the staged Healthanalytics directory "
         "or to healthanalytics/Key_Indicator_State_and_District_wise_data directly."
     )
 

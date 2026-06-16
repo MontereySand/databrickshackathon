@@ -4,11 +4,11 @@
 
 ## Repository & harness context
 
-Neelu lives in the `neelu/` subfolder of a larger checkout. The **parent directory is the "Everything Claude Code" (ECC) toolkit** (`ecc-universal`), cloned from GitHub and used only as a development harness — it is not part of the product and is not deployed. When picking this up:
+Neelu lives in the `neelu/` subfolder of this repository. The root now contains only lightweight Codex configuration plus a trimmed workflow reference library (`skills/` and `commands/`) for Neelu work. When picking this up:
 
-- **The product is everything under `neelu/`.** Run all commands from `neelu/` (`npm run dev|build|test|typecheck|eval|check-scope`). Ignore the root `package.json` (ECC tooling).
-- Neither the root nor `neelu/` is a git repository yet. **Initialize git in `neelu/` first** (`cd neelu && git init`) so future changes are tracked and reversible before any larger refactor.
-- The ECC harness has been trimmed toward this stack (TypeScript/React/Vite/Express). Off-stack language rules/skills are being removed from the active Cursor surface; the ECC source may be retained as a searchable library. See the top-level `AGENTS.md` banner for the active-project pointer.
+- **The product is everything under `neelu/`.** Run all product commands from `neelu/` (`npm run dev|build|test|typecheck|eval|check-scope`).
+- There is no root Node package after the cleanup. Use `neelu/package.json` for product scripts.
+- The root git repository tracks the product plus selected workflow references. Do not reintroduce generated/vendor folders, raw CSV datasets, or off-stack harness directories.
 
 ## TL;DR for the next agent
 
@@ -41,7 +41,7 @@ These are the things we could **not** do here and that you must supply:
    - **AI Search / Vector Search**: endpoint + `AI_SEARCH_INDEX_NAME`.
    - **Unity Catalog**: `UC_CATALOG` / `UC_SCHEMA` for governed source tables.
    - **MLflow**: `MLFLOW_EXPERIMENT_NAME`.
-4. **`databricks` CLI** — not installed here; needed for `databricks bundle deploy`.
+4. **Live deployment access** — the `databricks` CLI is installed locally, but deploy/validation still needs an authenticated profile plus a workspace that supports Apps and Lakebase.
 
 ## Flip to `DATABRICKS` mode — step by step
 

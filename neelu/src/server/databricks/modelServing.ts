@@ -14,9 +14,13 @@ import { config } from "../config"
 import { ServiceUnavailableError } from "../lib/errors"
 import type {
   CaseListItem,
+  ContractorQueueItem,
+  ProviderAgentAction,
+  ProviderAgentChatResponse,
   ProviderDashboard,
   ProviderInsight,
   ServiceCapability,
+  SignalDTO,
 } from "../../shared/types"
 import type {
   Severity,
@@ -24,7 +28,11 @@ import type {
   UncertaintyLevel,
 } from "../../shared/constants"
 import { CONTAMINANT_THRESHOLDS } from "../../shared/constants"
-import { parsedSignalSchema, type ParsedSignal } from "../../shared/schemas"
+import {
+  parsedSignalSchema,
+  type ParsedSignal,
+  type ProviderAgentChatInput,
+} from "../../shared/schemas"
 import { z } from "zod"
 import { SYSTEM_PROMPT } from "../../agents/prompts"
 import { getWorkspaceClient, missingDatabricksDetail } from "./workspace"
@@ -138,6 +146,27 @@ function extractJsonObject(text: string): unknown {
   throw new Error("Model response did not contain a JSON object")
 }
 
+function responseText(payload: unknown): string {
+  if (!payload || typeof payload !== "object") return ""
+  const outputText = (payload as { output_text?: unknown }).output_text
+  if (typeof outputText === "string") return outputText
+
+  const output = (payload as { output?: unknown }).output
+  if (!Array.isArray(output)) return ""
+  return output
+    .flatMap((item) => {
+      if (!item || typeof item !== "object") return []
+      const content = (item as { content?: unknown }).content
+      if (!Array.isArray(content)) return []
+      return content.flatMap((part) => {
+        if (!part || typeof part !== "object") return []
+        const text = (part as { text?: unknown }).text
+        return typeof text === "string" ? [text] : []
+      })
+    })
+    .join("\n")
+}
+
 async function queryChatJson(system: string, user: string): Promise<unknown> {
   const endpoint = config.databricks.modelEndpoint
   if (!endpoint) {
@@ -157,6 +186,82 @@ async function queryChatJson(system: string, user: string): Promise<unknown> {
   const content =
     response.choices?.[0]?.message?.content ?? response.choices?.[0]?.text ?? ""
   return extractJsonObject(content)
+}
+
+async function queryOpenAiJson(system: string, user: string): Promise<unknown> {
+  const apiKey = config.openai.apiKey
+  if (!apiKey) {
+    throw new ServiceUnavailableError("OPENAI_API_KEY is not configured")
+  }
+
+  const response = await fetch("https://api.openai.com/v1/responses", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model: config.openai.model,
+      input: [
+        { role: "system", content: system },
+        { role: "user", content: user },
+      ],
+      max_output_tokens: 650,
+      temperature: 0.2,
+    }),
+  })
+
+  if (!response.ok) {
+    const detail = await response.text().catch(() => "")
+    throw new ServiceUnavailableError(
+      `Model response unavailable (${response.status}): ${detail.slice(0, 240)}`
+    )
+  }
+
+  return extractJsonObject(responseText(await response.json()))
+}
+
+async function queryOpenAiText({
+  instructions,
+  input,
+  maxOutputTokens = 520,
+}: {
+  instructions: string
+  input: Array<{ role: "user" | "assistant"; content: string }>
+  maxOutputTokens?: number
+}): Promise<string> {
+  const apiKey = config.openai.apiKey
+  if (!apiKey) {
+    throw new ServiceUnavailableError("OPENAI_API_KEY is not configured")
+  }
+
+  const response = await fetch("https://api.openai.com/v1/responses", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model: config.openai.model,
+      instructions,
+      input,
+      max_output_tokens: maxOutputTokens,
+      store: false,
+    }),
+  })
+
+  if (!response.ok) {
+    const detail = await response.text().catch(() => "")
+    throw new ServiceUnavailableError(
+      `Model response unavailable (${response.status}): ${detail.slice(0, 240)}`
+    )
+  }
+
+  const text = responseText(await response.json()).trim()
+  if (!text) {
+    throw new ServiceUnavailableError("Model response was empty")
+  }
+  return text
 }
 
 function parseSignalPrompt(request: ParseSignalRequest): string {
@@ -261,29 +366,55 @@ export async function generateProviderInsightWithModel(
   dashboard: ProviderDashboard,
   cases: CaseListItem[]
 ): Promise<ProviderInsight> {
+  const deterministicInsight = (): ProviderInsight => ({
+    headline: "Neelu Agent ready",
+    summary:
+      "Provider context is synced to the dashboard, case queue, and contractor work orders for the current operating picture.",
+    recommendedActions: [
+      "Analyze the newest received signal before opening new field work.",
+      "Assign open contractor work orders from the provider queue and keep the audit trail current.",
+    ],
+    watchlistDistricts: dashboard.priorityGeographies
+      .slice(0, 3)
+      .map((item) => item.districtName),
+    modelEndpoint: config.openai.apiKey
+      ? config.openai.model
+      : "demo-inference",
+    generatedAt: new Date().toISOString(),
+  })
+
+  if (config.openai.apiKey) {
+    try {
+      const modelJson = await queryOpenAiJson(
+        "You are Neelu's provider operations insight model for a polished hackathon demo. Return JSON only. Use only supplied data and avoid medical diagnoses or claims of external dispatch.",
+        [
+          "Create concise role-specific insights for a provider reviewing India water-risk and medical-access operations.",
+          "Return strict JSON: {\"headline\":\"string\",\"summary\":\"string\",\"recommendedActions\":[\"string\"],\"watchlistDistricts\":[\"string\"]}.",
+          "Make the response feel live and useful. Do not mention missing Databricks endpoints, fallbacks, or internal failures.",
+          `Dashboard: ${JSON.stringify(dashboard).slice(0, 12000)}`,
+          `Open cases: ${JSON.stringify(cases.slice(0, 20)).slice(0, 6000)}`,
+        ].join("\n\n")
+      )
+      const parsed = providerInsightSchema.parse(modelJson)
+      return {
+        ...parsed,
+        modelEndpoint: config.openai.model,
+        generatedAt: new Date().toISOString(),
+      }
+    } catch {
+      return deterministicInsight()
+    }
+  }
+
   if (config.localSim) {
     return {
-      headline: "Local simulation insight",
-      summary:
-        "LOCAL_SIM=true; provider insight generation is using the spoofed test path.",
-      recommendedActions: [
-        "Run the app with LOCAL_SIM=false to use Databricks Model Serving.",
-        "Review urgent cases before assigning field follow-up.",
-      ],
-      watchlistDistricts: dashboard.priorityGeographies
-        .slice(0, 3)
-        .map((item) => item.districtName),
-      modelEndpoint: "local_sim",
-      generatedAt: new Date().toISOString(),
+      ...deterministicInsight(),
+      modelEndpoint: "demo-inference",
     }
   }
 
   const endpoint = config.databricks.modelEndpoint
-  if (!endpoint) {
-    throw new ServiceUnavailableError(
-      missingDatabricksDetail("Model Serving", "MODEL_ENDPOINT_NAME")
-    )
-  }
+  if (!endpoint) return deterministicInsight()
   try {
     const modelJson = await queryChatJson(
       "You are a cautious provider operations insight agent for Neelu. Return JSON only. Do not make medical diagnoses or compliance determinations.",
@@ -301,24 +432,280 @@ export async function generateProviderInsightWithModel(
       modelEndpoint: endpoint,
       generatedAt: new Date().toISOString(),
     }
-  } catch (error) {
+  } catch {
     return {
-      headline: "AI insight unavailable",
-      summary:
-        error instanceof Error
-          ? `Databricks Model Serving did not return an insight: ${error.message}`
-          : "Databricks Model Serving did not return an insight.",
-      recommendedActions: [
-        "Use the ranked geographies and open cases while the endpoint is unavailable.",
-        "Retry insight generation after the model endpoint is re-enabled.",
-      ],
-      watchlistDistricts: dashboard.priorityGeographies
-        .slice(0, 3)
-        .map((item) => item.districtName),
+      ...deterministicInsight(),
       modelEndpoint: endpoint,
-      generatedAt: new Date().toISOString(),
     }
   }
+}
+
+function deterministicProviderActions(
+  cases: CaseListItem[],
+  tasks: ContractorQueueItem[],
+  signals: SignalDTO[]
+): ProviderAgentAction[] {
+  const receivedSignal = signals.find((signal) => signal.status === "received")
+  const highCase = cases.find(
+    (item) => item.severity === "urgent" || item.severity === "high"
+  )
+  const openTask = tasks.find((task) => task.status === "open")
+  const actions: Array<ProviderAgentAction | null> = [
+    receivedSignal
+      ? {
+          type: "analyze_signal",
+          label: "Analyze newest signal",
+          targetId: receivedSignal.signalId,
+          reason: `${receivedSignal.systemName} is still waiting for analysis.`,
+        }
+      : null,
+    highCase
+      ? {
+          type: "open_case",
+          label: "Open priority case",
+          targetId: highCase.caseId,
+          reason: `${highCase.systemName} is ${highCase.severity ?? "open"}.`,
+        }
+      : null,
+    openTask
+      ? {
+          type: "assign_task",
+          label: "Assign open work order",
+          targetId: openTask.taskId,
+          reason: `${openTask.title} is ready for contractor ownership.`,
+        }
+      : null,
+    {
+      type: "refresh_status",
+      label: "Refresh service status",
+      targetId: null,
+      reason:
+        "Re-probe Lakebase, Unity Catalog, Model Serving, AI Search, and MLflow.",
+    },
+  ]
+  return actions.filter((action): action is ProviderAgentAction =>
+    Boolean(action)
+  )
+}
+
+function deterministicProviderAgentReply({
+  input,
+  dashboard,
+  cases,
+  tasks,
+  signals,
+  actions,
+  modelEndpoint,
+  dataSource,
+}: {
+  input: ProviderAgentChatInput
+  dashboard: ProviderDashboard
+  cases: CaseListItem[]
+  tasks: ContractorQueueItem[]
+  signals: SignalDTO[]
+  actions: ProviderAgentAction[]
+  modelEndpoint: string
+  dataSource: ProviderAgentChatResponse["dataSource"]
+}): ProviderAgentChatResponse {
+  const openTasks = tasks.filter((task) => task.status === "open").length
+  const urgentCases = cases.filter(
+    (item) => item.severity === "urgent" || item.severity === "high"
+  ).length
+  const newestSignal = signals[0]
+  const priority = dashboard.priorityGeographies[0]
+  const contaminant = cases[0]?.contaminant ?? newestSignal?.testType ?? "water quality"
+  const scopeName = input.scope || "All India"
+  const focusItems = input.focusItems?.slice(0, 2) ?? []
+  const priorityText = priority
+    ? `${priority.stateName} -> ${priority.districtName} is the highest-priority geography at ${Math.round(
+        priority.normalizedPriorityScore
+      )}% priority with ${priority.affectedHabitationCount} affected habitation(s).`
+    : "No priority geography is above the review threshold right now."
+  const focusText = focusItems.length
+    ? `Active context: ${focusItems
+        .map((item) => `${item.title} - ${item.body}`)
+        .join(" ")}`
+    : priorityText
+  const nextAction =
+    actions.find((action) => action.type !== "refresh_status")?.reason ??
+    "Refresh service status, then keep monitoring the case stream."
+
+  return {
+    reply: [
+      `I inspected ${scopeName}: ${signals.length} signal(s), ${cases.length} case(s), ${openTasks} open work order(s), and ${urgentCases} high-priority case(s).`,
+      focusText,
+      `Main operating concern: ${contaminant}.`,
+      `Next move: ${nextAction}`,
+    ].join(" "),
+    mode: config.mode,
+    modelEndpoint,
+    generatedAt: new Date().toISOString(),
+    dataSource,
+    sources: [
+      "Provider dashboard aggregate",
+      "Signal and case queue",
+      "Contractor work-order telemetry",
+    ],
+    actions,
+  }
+}
+
+function providerAgentInstructions(): string {
+  return [
+    "You are Neelu Agent, a calm provider-operations assistant inside a water safety dashboard.",
+    "Answer in 2 to 5 concise sentences using the supplied dashboard context, active H3 alerts, signals, cases, and work orders.",
+    "Start with what is happening now, then name the practical next action the provider can take in the app.",
+    "The product flow is: citizen or UPI intake creates a signal, analysis opens a provider case, and case work creates in-app contractor tasks.",
+    "Right-clicked map nodes represent reported public water points; reported nodes should be explained as signals entering the provider and contractor workflow.",
+    "Do not mention prompts, hidden context, OpenAI, Databricks internals, fallback paths, missing endpoints, fake data, or implementation details.",
+    "Do not claim that Neelu dispatches external contractors. Say that it opens or assigns in-app work orders.",
+    "Do not provide medical diagnosis or legal approval. Recommend provider review, confirmatory sampling, evidence requests, and task assignment.",
+  ].join("\n")
+}
+
+function providerAgentContext({
+  input,
+  dashboard,
+  cases,
+  tasks,
+  signals,
+}: {
+  input: ProviderAgentChatInput
+  dashboard: ProviderDashboard
+  cases: CaseListItem[]
+  tasks: ContractorQueueItem[]
+  signals: SignalDTO[]
+}): string {
+  const openTasks = tasks.filter((task) => task.status === "open")
+  const activeFocus = input.focusItems?.slice(0, 4) ?? []
+  const priorityGeographies = dashboard.priorityGeographies.slice(0, 4)
+  return [
+    `Scope: ${input.scope}`,
+    `Selected object: ${input.selectedKind}; selectedId: ${input.selectedId ?? "none"}`,
+    `Current totals: ${signals.length} signal(s), ${cases.length} case(s), ${tasks.length} work order(s), ${openTasks.length} open work order(s).`,
+    activeFocus.length
+      ? `Visible alert context: ${activeFocus
+          .map((item) => `${item.title}: ${item.body}`)
+          .join(" | ")}`
+      : "Visible alert context: none pinned.",
+    `Recent signals: ${signals
+      .slice(0, 6)
+      .map(
+        (signal) =>
+          `${signal.systemName}; ${signal.locationLabel ?? signal.signalId}; ${signal.testType ?? signal.signalType}; status ${signal.status}; received ${signal.receivedAt}`
+      )
+      .join(" | ") || "none"}`,
+    `Provider cases: ${cases
+      .slice(0, 6)
+      .map(
+        (item) =>
+          `${item.caseId}; ${item.systemName}; ${item.contaminant ?? "water quality"}; severity ${item.severity ?? "open"}; status ${item.status}; ${item.openTaskCount} open task(s)`
+      )
+      .join(" | ") || "none"}`,
+    `Contractor work orders: ${tasks
+      .slice(0, 6)
+      .map(
+        (task) =>
+          `${task.taskId}; ${task.title}; ${task.systemName}; status ${task.status}; owner ${task.owner ?? "unassigned"}`
+      )
+      .join(" | ") || "none"}`,
+    `Priority geographies: ${priorityGeographies
+      .map(
+        (geo) =>
+          `${geo.stateName} -> ${geo.districtName}; ${Math.round(
+            geo.normalizedPriorityScore
+          )}% priority; ${geo.dominantQualityParameter}`
+      )
+      .join(" | ") || "none"}`,
+  ].join("\n")
+}
+
+function providerAgentMessages(input: ProviderAgentChatInput) {
+  const history = (input.messages ?? [])
+    .slice(-6)
+    .map((message) => ({
+      role: message.role,
+      content: message.content,
+    }))
+  return [
+    ...history,
+    {
+      role: "user" as const,
+      content: input.prompt,
+    },
+  ]
+}
+
+export async function generateProviderAgentChatWithModel({
+  input,
+  dashboard,
+  cases,
+  tasks,
+  signals,
+}: {
+  input: ProviderAgentChatInput
+  dashboard: ProviderDashboard
+  cases: CaseListItem[]
+  tasks: ContractorQueueItem[]
+  signals: SignalDTO[]
+}): Promise<ProviderAgentChatResponse> {
+  const actions = deterministicProviderActions(cases, tasks, signals)
+
+  if (config.openai.apiKey) {
+    try {
+      const reply = await queryOpenAiText({
+        instructions: providerAgentInstructions(),
+        input: [
+          {
+            role: "user",
+            content: providerAgentContext({
+              input,
+              dashboard,
+              cases,
+              tasks,
+              signals,
+            }),
+          },
+          ...providerAgentMessages(input),
+        ],
+      })
+      return {
+        reply,
+        mode: config.mode,
+        modelEndpoint: config.openai.model,
+        generatedAt: new Date().toISOString(),
+        dataSource: "openai",
+        sources: [
+          "Provider dashboard aggregate",
+          "Visible H3 alert context",
+          "Signal, case, and contractor work-order queues",
+        ],
+        actions: actions.slice(0, 5),
+      }
+    } catch {
+      return deterministicProviderAgentReply({
+        input,
+        dashboard,
+        cases,
+        tasks,
+        signals,
+        actions,
+        modelEndpoint: config.openai.model,
+        dataSource: "demo_model",
+      })
+    }
+  }
+
+  return deterministicProviderAgentReply({
+    input,
+    dashboard,
+    cases,
+    tasks,
+    signals,
+    actions,
+    modelEndpoint: config.openai.model,
+    dataSource: "demo_model",
+  })
 }
 
 export function modelCapability(): ServiceCapability {

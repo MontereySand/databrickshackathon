@@ -1,0 +1,33 @@
+# Dependencies
+node_modules/
+neelu/node_modules/
+
+# Build output and caches
+dist/
+neelu/dist/
+neelu/.vite/
+neelu/.data/
+coverage/
+.cache/
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+credentials*
+
+# Raw / staged datasets
+raw-data/
+*.pdf
+*.docx
+*.zip
+
+# Logs
+npm-debug.log*
+*.log
+
+# Python caches for Databricks notebooks
+__pycache__/
+*.pyc

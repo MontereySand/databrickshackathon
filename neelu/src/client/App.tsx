@@ -97,7 +97,7 @@ export function App() {
       <main
         className={cn(
           providerMode
-            ? "mx-auto max-w-[1800px] px-4 py-4 pb-16"
+            ? "p-0 pb-20"
             : location.pathname === "/"
               ? ""
               : "mx-auto max-w-6xl px-4 py-4 pb-8"

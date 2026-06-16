@@ -35,6 +35,7 @@ The primary demo scenario is **high nitrate near a school**.
 | `npm run test` | Vitest + supertest API/eval tests. |
 | `npm run eval` | Runs the eval harness over all scenarios; non-zero exit on any failed scorer. |
 | `npm run seed` | Seeds demo data if the DB is empty. |
+| `npm run seed:fountains -- <csv>` | Optional local helper for generating water points from a caller-supplied CSV. Raw source datasets are not committed. |
 | `npm run reset-demo` | Deterministically wipes and reseeds (`--seed <n>`, `--scenario <name>`). |
 | `npm run check-scope` | Verifies required files exist and client/server routes agree. |
 

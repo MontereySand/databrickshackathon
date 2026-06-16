@@ -5,7 +5,8 @@ import { latLngToCell } from "h3-js"
 import { closeDb, getDb } from "../src/server/db"
 import { insertWaterPoint } from "../src/server/db/repositories"
 
-const DEFAULT_CSV = "notes/data/healthanalytics/Key_indicator_districtwise.csv"
+const CSV_USAGE =
+  "Pass a local CSV path as the first argument or set NEELU_FOUNTAINS_CSV. Raw source datasets are not committed."
 
 function splitCsvLine(line: string): string[] {
   const cells: string[] = []
@@ -61,10 +62,14 @@ function pick(row: Record<string, string>, candidates: string[]): string {
 }
 
 async function main() {
-  const file = path.resolve(process.argv[2] ?? DEFAULT_CSV)
+  const inputCsv = process.argv[2] ?? process.env.NEELU_FOUNTAINS_CSV
+  if (!inputCsv) {
+    throw new Error(CSV_USAGE)
+  }
+  const file = path.resolve(inputCsv)
   if (!existsSync(file)) {
     throw new Error(
-      `CSV not found at ${file}. This script is local/dev only; pass a copied fixture path if needed.`
+      `CSV not found at ${file}. ${CSV_USAGE}`
     )
   }
   const csv = await readFile(file, "utf8")

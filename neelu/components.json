@@ -12,6 +12,8 @@
   },
   "iconLibrary": "remixicon",
   "rtl": true,
+  "menuColor": "default",
+  "menuAccent": "subtle",
   "aliases": {
     "components": "@/client/components",
     "utils": "@/client/lib/utils",
@@ -19,7 +21,9 @@
     "lib": "@/client/lib",
     "hooks": "@/client/hooks"
   },
-  "menuColor": "default",
-  "menuAccent": "subtle",
-  "registries": {}
+  "registries": {
+    "@animate-ui": "https://animate-ui.com/r/{name}.json",
+    "@agents-ui": "https://livekit.com/ui/r/{name}.json",
+    "@ai-elements": "https://ai-sdk.dev/elements/api/registry/{name}.json"
+  }
 }

@@ -1,6 +1,6 @@
 # Databricks data pipeline
 
-Neelu uses Databricks tables as the source of truth for analytics and app ranking. Do not use local `/notes/data` files as app inputs.
+Neelu uses Databricks tables as the source of truth for analytics and app ranking. Do not use local raw CSV folders as app inputs.
 
 ## Verified source tables
 
@@ -22,15 +22,18 @@ Project datasets:
 - `databricks/notebooks/explore_app_data_contracts.py` profiles source tables against the app contracts and writes small contract/profile tables.
 - `databricks/notebooks/process_app_datasets.py` builds the contract-backed app-ready Delta tables for Neelu.
 
-The upload notebook needs the local data staged in Databricks first. You can upload the whole `notes/data` directory, for example:
+The upload notebook needs the source data staged in Databricks first. Raw CSV
+datasets are intentionally not committed to this repo; keep them outside the
+repo or in a workspace volume, then upload/stage them before running the job.
+A typical staged location is:
 
 ```text
-dbfs:/Volumes/workspace/hackathon/raw_files/notes/data
+dbfs:/Volumes/workspace/hackathon/raw_files/healthanalytics
 ```
 
 The notebook will resolve the nested `healthanalytics/Key_Indicator_State_and_District_wise_data` folder automatically. Once staged, run the notebook with:
 
-- `source_dir`: staged `notes/data` path, or the nested healthanalytics CSV folder path
+- `source_dir`: staged data path, or the nested healthanalytics CSV folder path
 - `output_catalog`: `workspace`
 - `output_schema`: `hackathon`
 

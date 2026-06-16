@@ -173,6 +173,33 @@ export const h3MapQuerySchema = z
   .strict()
 export type H3MapQuery = z.infer<typeof h3MapQuerySchema>
 
+const providerAgentFocusItemSchema = z
+  .object({
+    id: z.string().min(1).max(160),
+    title: z.string().min(1).max(160),
+    body: z.string().min(1).max(360),
+  })
+  .strict()
+
+const providerAgentMessageSchema = z
+  .object({
+    role: z.enum(["user", "assistant"]),
+    content: z.string().min(1).max(1600),
+  })
+  .strict()
+
+export const providerAgentChatSchema = z
+  .object({
+    prompt: z.string().min(1).max(2000),
+    scope: z.string().min(1).max(240).default("All India"),
+    selectedKind: z.enum(["system", "cell", "facility", "task", "none"]).default("none"),
+    selectedId: z.string().min(1).max(240).optional().nullable(),
+    focusItems: z.array(providerAgentFocusItemSchema).max(4).optional(),
+    messages: z.array(providerAgentMessageSchema).max(8).optional(),
+  })
+  .strict()
+export type ProviderAgentChatInput = z.infer<typeof providerAgentChatSchema>
+
 export const analyzeSchema = z
   .object({
     actor: z.string().min(1).max(120).optional(),

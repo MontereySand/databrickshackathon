@@ -18,7 +18,10 @@ import {
 import { ok, parse } from "../http/respond"
 import { NotFoundError } from "../lib/errors"
 import { probeCapabilities } from "../databricks/capabilities"
-import { generateProviderInsightWithModel } from "../databricks/modelServing"
+import {
+  generateProviderAgentChatWithModel,
+  generateProviderInsightWithModel,
+} from "../databricks/modelServing"
 import { config } from "../config"
 import { getGoogleMapsApiKey } from "../databricks/secrets"
 import { submitSignal } from "../services/signals"
@@ -51,6 +54,8 @@ import {
   demoResetSchema,
   h3MapQuerySchema,
   overrideSchema,
+  providerAgentChatSchema,
+  type ProviderAgentChatInput,
   requestMoreEvidenceSchema,
   reviewCaseSchema,
   signalIntakeSchema,
@@ -58,7 +63,12 @@ import {
   upiCallbackSchema,
 } from "../../shared/schemas"
 import { DEFAULT_OPS_ACTOR } from "../../shared/constants"
-import type { HealthInfo, SignalDTO } from "../../shared/types"
+import type {
+  CaseListItem,
+  ContractorQueueItem,
+  HealthInfo,
+  SignalDTO,
+} from "../../shared/types"
 
 export const apiRouter = Router()
 
@@ -238,6 +248,93 @@ apiRouter.get("/provider/insights", async (_req, res) => {
     listCases(db),
   ])
   ok(res, await generateProviderInsightWithModel(dashboard, cases))
+})
+
+function scopedAgentRows(
+  input: ProviderAgentChatInput,
+  cases: CaseListItem[],
+  tasks: ContractorQueueItem[],
+  signals: SignalDTO[]
+): {
+  cases: CaseListItem[]
+  tasks: ContractorQueueItem[]
+  signals: SignalDTO[]
+} {
+  const selectedId = input.selectedId
+  if (!selectedId || input.selectedKind === "none") return { cases, tasks, signals }
+
+  if (input.selectedKind === "task") {
+    const scopedTasks = tasks.filter((task) => task.taskId === selectedId)
+    const caseIds = new Set(scopedTasks.map((task) => task.caseId))
+    const scopedCases = cases.filter((item) => caseIds.has(item.caseId))
+    const signalIds = new Set(scopedCases.map((item) => item.signalId))
+    return {
+      cases: scopedCases,
+      tasks: scopedTasks,
+      signals: signals.filter((signal) => signalIds.has(signal.signalId)),
+    }
+  }
+
+  const systemId =
+    input.selectedKind === "facility" && selectedId.startsWith("facility-")
+      ? selectedId.slice("facility-".length)
+      : input.selectedKind === "system"
+        ? selectedId
+        : null
+
+  if (systemId) {
+    const scopedCases = cases.filter((item) => item.systemId === systemId)
+    const scopedSignals = signals.filter((signal) => signal.systemId === systemId)
+    const caseIds = new Set(scopedCases.map((item) => item.caseId))
+    const systemNames = new Set(scopedCases.map((item) => item.systemName))
+    return {
+      cases: scopedCases,
+      signals: scopedSignals,
+      tasks: tasks.filter(
+        (task) => caseIds.has(task.caseId) || systemNames.has(task.systemName)
+      ),
+    }
+  }
+
+  if (input.selectedKind === "cell") {
+    const scopedSignals = signals.filter(
+      (signal) => signal.payloadJson?.h3Cell === selectedId
+    )
+    const scopedTasks = tasks.filter((task) => task.h3Cell === selectedId)
+    const signalIds = new Set(scopedSignals.map((signal) => signal.signalId))
+    const taskCaseIds = new Set(scopedTasks.map((task) => task.caseId))
+    return {
+      signals: scopedSignals,
+      tasks: scopedTasks,
+      cases: cases.filter(
+        (item) => signalIds.has(item.signalId) || taskCaseIds.has(item.caseId)
+      ),
+    }
+  }
+
+  return { cases, tasks, signals }
+}
+
+apiRouter.post("/provider/agent-chat", async (req, res) => {
+  const db = await getDb()
+  const input = parse(providerAgentChatSchema, req.body ?? {})
+  const [dashboard, cases, tasks, signals] = await Promise.all([
+    providerDashboard(db),
+    listCases(db),
+    contractorQueue(db),
+    listSignals(db),
+  ])
+  const scopedRows = scopedAgentRows(input, cases, tasks, signals)
+  ok(
+    res,
+    await generateProviderAgentChatWithModel({
+      input,
+      dashboard,
+      cases: scopedRows.cases,
+      tasks: scopedRows.tasks,
+      signals: scopedRows.signals,
+    })
+  )
 })
 
 apiRouter.post("/demo/reset", async (req, res) => {

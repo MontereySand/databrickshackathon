@@ -17,4 +17,8 @@ export default defineConfig({
     outDir: "dist/client",
     emptyOutDir: true,
   },
+  server: {
+    hmr: false,
+    ws: false,
+  },
 })

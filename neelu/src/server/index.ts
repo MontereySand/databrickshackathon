@@ -30,7 +30,11 @@ async function attachClient(app: express.Express): Promise<void> {
   // eslint-disable-next-line no-inline-import -- intentional build/runtime split
   const { createServer } = await import("vite");
   const vite = await createServer({
-    server: { middlewareMode: true },
+    server: {
+      hmr: false,
+      middlewareMode: true,
+      ws: false,
+    },
     appType: "spa",
   });
   app.use(vite.middlewares);
