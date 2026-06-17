@@ -117,6 +117,7 @@ export type MapProps = {
   useEmptyStyle?: boolean
   styles?: Partial<Record<Theme, MapStyle>>
   loading?: boolean
+  showLoadingOverlay?: boolean
   onMapError?: (message: string) => void
 } & Omit<MapOptions, "container" | "style">
 
@@ -136,6 +137,7 @@ const Map = forwardRef<MapRef, MapProps>(function Map(
     useEmptyStyle = false,
     styles,
     loading = false,
+    showLoadingOverlay = true,
     onMapError,
     ...options
   },
@@ -205,7 +207,7 @@ const Map = forwardRef<MapRef, MapProps>(function Map(
   return (
     <MapContext.Provider value={{ map, isLoaded: loaded }}>
       <div ref={containerRef} className={cn("relative h-full w-full", className)}>
-        {(!loaded || loading) && <MapLoader />}
+        {showLoadingOverlay && (!loaded || loading) && <MapLoader />}
         {map ? children : null}
       </div>
     </MapContext.Provider>

@@ -196,7 +196,10 @@ export function buildReportableMapNodes(
   })
 }
 
-export function reportInputForNode(node: ReportableMapNode): CreateSignalInput {
+export function reportInputForNode(
+  node: ReportableMapNode,
+  submittedBy = "provider-map"
+): CreateSignalInput {
   return {
     systemId: node.systemId,
     signalType: "map_node_report",
@@ -205,7 +208,7 @@ export function reportInputForNode(node: ReportableMapNode): CreateSignalInput {
     unit: node.unit,
     locationLabel: node.locationLabel,
     notes: node.notes,
-    submittedBy: "provider-map",
+    submittedBy,
   }
 }
 
